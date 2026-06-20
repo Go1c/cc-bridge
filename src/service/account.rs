@@ -570,8 +570,9 @@ impl AccountService {
         exclude_ids: &[i64],
         allowed_ids: &[i64],
     ) -> Result<Account, AppError> {
+        // 包装器不区分模型，按账号级（非 Sonnet）逻辑选号。
         let selected = self
-            .select_account_with_context(session_hash, exclude_ids, allowed_ids)
+            .select_account_with_context(session_hash, exclude_ids, allowed_ids, "")
             .await?;
         if selected.should_bind_session {
             let _ = self
@@ -588,6 +589,7 @@ impl AccountService {
         session_hash: &str,
         exclude_ids: &[i64],
         allowed_ids: &[i64],
+        model_id: &str,
     ) -> Result<SelectedAccount, AppError> {
         // 检查粘性会话
         if !session_hash.is_empty() {
@@ -640,12 +642,29 @@ impl AccountService {
             candidates = rpm_available;
         }
 
+        // Sonnet 请求额外避开 Sonnet 7d 子配额已撞墙的账号：仅按本次请求的模型在选号时判断，
+        // 不写账号级 rate_limit_reset_at，因此不会误伤 Opus 等其他模型。若全部 Sonnet 都撞墙，
+        // 则保留原候选，交给后续退避/重试，避免无号可用。
+        if is_sonnet_model(model_id) {
+            let sonnet_ok: Vec<Account> = candidates
+                .iter()
+                .filter(|a| {
+                    check_usage_window(&a.usage_data, "seven_day_sonnet", USAGE_HIT_THRESHOLD)
+                        .is_none()
+                })
+                .cloned()
+                .collect();
+            if !sonnet_ok.is_empty() {
+                candidates = sonnet_ok;
+            }
+        }
+
         if candidates.is_empty() {
             return Err(AppError::ServiceUnavailable("no available accounts".into()));
         }
 
         // 按优先级分组，同优先级内按综合评分选择（5h 用量 + 并发负载）
-        let selected = self.select_by_score(&candidates).await;
+        let selected = self.select_by_score(&candidates, model_id).await;
 
         Ok(SelectedAccount {
             account: selected,
@@ -1153,7 +1172,7 @@ impl AccountService {
     /// - `concurrency_load_pct = (活跃 + 排队) / concurrency × 100`,排队中的请求也计入负载
     /// - 并发已满的账号优先排除，仅在所有账号都满时才参与评分
     /// - 得分相同时随机选择
-    async fn select_by_score(&self, accounts: &[Account]) -> Account {
+    async fn select_by_score(&self, accounts: &[Account], model_id: &str) -> Account {
         if accounts.len() == 1 {
             return accounts[0].clone();
         }
@@ -1177,8 +1196,16 @@ impl AccountService {
         for acc in &best {
             let eff_5h =
                 effective_utilization_detail(acc, "five_hour", 5.0 * 3600.0, now).effective;
-            let eff_7d =
+            let mut eff_7d =
                 effective_utilization_detail(acc, "seven_day", 7.0 * 24.0 * 3600.0, now).effective;
+            // Sonnet 请求把 Sonnet 7d 子配额也纳入评分（取两者较大值），
+            // 引导 Sonnet 流量偏向 Sonnet 余量更多的账号，且不影响 Opus 评分。
+            if is_sonnet_model(model_id) {
+                let eff_7d_sonnet =
+                    effective_utilization_detail(acc, "seven_day_sonnet", 7.0 * 24.0 * 3600.0, now)
+                        .effective;
+                eff_7d = eff_7d.max(eff_7d_sonnet);
+            }
             // 从 FIFO 排队器读取实时活跃/等待数
             let queue = self.get_or_create_queue(acc.id, acc.concurrency).await;
             let current = queue.active_count();
@@ -1360,9 +1387,15 @@ enum RateLimitWindow {
     FiveHour(chrono::DateTime<Utc>),
 }
 
+/// 判断模型是否归入 Sonnet 限流桶（Sonnet 有独立的 7 天子配额 `seven_day_sonnet`）。
+pub(crate) fn is_sonnet_model(model_id: &str) -> bool {
+    model_id.to_ascii_lowercase().contains("sonnet")
+}
+
 /// 根据 usage_data JSON 判断哪个窗口撞墙。
 /// 优先检查 7 天窗口（同时命中时 7 天 reset 更晚，限流更久）。
-/// Sonnet 7 天窗口暂不纳入判断。
+/// Sonnet 7 天子配额（`seven_day_sonnet`）只在选号阶段按请求模型规避，
+/// 不在此处纳入账号级隔离判断，避免误伤 Opus 等其他模型。
 fn classify_rate_limit(usage: &serde_json::Value, threshold: f64) -> Option<RateLimitWindow> {
     if let Some(reset_at) = check_usage_window(usage, "seven_day", threshold) {
         return Some(RateLimitWindow::SevenDay(reset_at));

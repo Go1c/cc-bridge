@@ -351,7 +351,7 @@ async fn test_sticky_selection_does_not_switch_when_rpm_saturated() {
 
     let session_hash = "sticky-rpm-session";
     let selected = svc
-        .select_account_with_context(session_hash, &[], &[])
+        .select_account_with_context(session_hash, &[], &[], "")
         .await
         .unwrap();
     assert_eq!(selected.account.id, a1.id);
@@ -366,7 +366,7 @@ async fn test_sticky_selection_does_not_switch_when_rpm_saturated() {
         .expect("successful request should bind sticky session");
 
     let selected = svc
-        .select_account_with_context(session_hash, &[], &[])
+        .select_account_with_context(session_hash, &[], &[], "")
         .await
         .unwrap();
     assert_eq!(selected.account.id, a1.id);
@@ -391,7 +391,7 @@ async fn test_uncommitted_session_selection_does_not_pollute_rpm_retry() {
         .expect("first request should saturate a1 rpm");
 
     let selected = svc
-        .select_account_with_context(session_hash, &[], &[])
+        .select_account_with_context(session_hash, &[], &[], "")
         .await
         .unwrap();
     assert_eq!(selected.account.id, a2.id);
@@ -399,7 +399,7 @@ async fn test_uncommitted_session_selection_does_not_pollute_rpm_retry() {
     assert!(selected.should_bind_session);
 
     let selected = svc
-        .select_account_with_context(session_hash, &[a2.id], &[])
+        .select_account_with_context(session_hash, &[a2.id], &[], "")
         .await
         .unwrap();
     assert_eq!(selected.account.id, a1.id);
@@ -525,4 +525,44 @@ async fn test_403_after_429_expired_does_disable() {
     let final_state = svc.get_account(account.id).await.unwrap();
     assert_eq!(final_state.status, AccountStatus::Disabled);
     assert_eq!(final_state.disable_reason, "403 认证失败");
+}
+
+// ─── Sonnet 7d 子配额按模型分桶 ────────────────────────────────
+
+/// Sonnet 7d 撞墙的账号：Sonnet 请求应避开它，Opus 请求仍可正常使用，
+/// 证明 Sonnet 子配额墙不会误伤其他模型。
+#[tokio::test]
+async fn test_sonnet_7d_wall_avoided_for_sonnet_but_not_opus() {
+    let (store, svc) = setup().await;
+    let a1 = create_test_account(&svc, "sonnet-walled@example.com").await;
+    let a2 = create_test_account(&svc, "sonnet-free@example.com").await;
+
+    // a1 的 Sonnet 7d 子配额已撞墙（100%，5 天后才重置），但账号本身未被隔离。
+    // usage_data 经专用的 update_usage 持久化（update_account 不写该列）。
+    let reset = (Utc::now() + Duration::days(5)).to_rfc3339();
+    let usage = serde_json::json!({
+        "seven_day_sonnet": { "utilization": 100.0, "resets_at": reset }
+    })
+    .to_string();
+    store.update_usage(a1.id, &usage).await.unwrap();
+
+    // Sonnet 请求：a1 被选号期过滤，应落到 a2。
+    let sonnet = svc
+        .select_account_with_context("", &[], &[], "claude-sonnet-4-5")
+        .await
+        .unwrap();
+    assert_eq!(
+        sonnet.account.id, a2.id,
+        "Sonnet 请求应避开 Sonnet 7d 撞墙的账号"
+    );
+
+    // Opus 请求：即便只剩 a1 可选（排除 a2），也应能拿到 a1，证明不被 Sonnet 墙拦截。
+    let opus = svc
+        .select_account_with_context("", &[a2.id], &[], "claude-opus-4-8")
+        .await
+        .unwrap();
+    assert_eq!(
+        opus.account.id, a1.id,
+        "Opus 请求不应被 Sonnet 7d 墙影响"
+    );
 }

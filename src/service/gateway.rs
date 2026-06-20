@@ -915,7 +915,7 @@ impl GatewayService {
 
         let selected = match self
             .account_svc
-            .select_account_with_context(&session_hash, &blocked_ids, &allowed_ids)
+            .select_account_with_context(&session_hash, &blocked_ids, &allowed_ids, &model_id)
             .await
         {
             Ok(selected) => selected,
@@ -1060,6 +1060,13 @@ impl GatewayService {
             (vec![], vec![])
         };
 
+        // 选号时用于区分 Sonnet 限流桶的请求模型（在重试循环外取一次即可）。
+        let req_model_id = body_map
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or_default()
+            .to_string();
+
         // 429 自动换号 / 并发降级重试循环
         let mut exclude_ids = blocked_ids.clone();
         let mut backoff_retry_ids: Vec<i64> = Vec::new();
@@ -1071,7 +1078,7 @@ impl GatewayService {
             let t0 = std::time::Instant::now();
             let selected = match self
                 .account_svc
-                .select_account_with_context(&session_hash, &exclude_ids, &allowed_ids)
+                .select_account_with_context(&session_hash, &exclude_ids, &allowed_ids, &req_model_id)
                 .await
             {
                 Ok(selected) => {
@@ -4410,7 +4417,9 @@ pub(crate) fn extract_passive_usage(
         }
     }
 
-    // 7 天窗口：同上
+    // 7 天窗口：同上。
+    // 当 representative-claim 标明本次限流代表 Sonnet 子配额时，把 7d 数据写入
+    // seven_day_sonnet（而非账号级 seven_day），避免误把 Sonnet 撞墙算到 Opus 头上。
     if let (Some(util_str), Some(reset_raw)) = (
         get_str("anthropic-ratelimit-unified-7d-utilization"),
         get_str("anthropic-ratelimit-unified-7d-reset"),
@@ -4419,7 +4428,14 @@ pub(crate) fn extract_passive_usage(
             util_str.parse::<f64>(),
             normalize_reset_timestamp(&reset_raw),
         ) {
-            usage["seven_day"] =
+            let key = if get_str("anthropic-ratelimit-unified-representative-claim").as_deref()
+                == Some("seven_day_sonnet")
+            {
+                "seven_day_sonnet"
+            } else {
+                "seven_day"
+            };
+            usage[key] =
                 serde_json::json!({ "utilization": util * 100.0, "resets_at": reset });
             has_window = true;
         }

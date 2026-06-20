@@ -147,141 +147,93 @@ macro_rules! static_ref {
 }
 
 // ---------------------------------------------------------------------------
-// Node.js 密码套件（52 个，与 tls.peet.ws 实测对齐）
+// Node.js 密码套件（17 个，对齐真实 claude-cli/2.1.183 抓取的 JA3）
+// 顺序：TLS1.3(1301,1302,1303) → ECDHE-GCM → ChaCha20 → ECDHE-CBC → RSA-GCM → RSA-CBC
 // ---------------------------------------------------------------------------
 #[dynamic]
 pub static NODEJS_CIPHER: Vec<GreaseOrCipher> = vec![
-    GreaseOrCipher::T(CipherSuite::TLS13_AES_256_GCM_SHA384),
-    GreaseOrCipher::T(CipherSuite::TLS13_CHACHA20_POLY1305_SHA256),
-    GreaseOrCipher::T(CipherSuite::TLS13_AES_128_GCM_SHA256),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC02F)),
+    GreaseOrCipher::T(CipherSuite::TLS13_AES_128_GCM_SHA256), // 0x1301
+    GreaseOrCipher::T(CipherSuite::TLS13_AES_256_GCM_SHA384), // 0x1302
+    GreaseOrCipher::T(CipherSuite::TLS13_CHACHA20_POLY1305_SHA256), // 0x1303
     GreaseOrCipher::T(CipherSuite::Unknown(0xC02B)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC030)),
+    GreaseOrCipher::T(CipherSuite::Unknown(0xC02F)),
     GreaseOrCipher::T(CipherSuite::Unknown(0xC02C)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x009E)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC027)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x0067)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC028)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x006B)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x00A3)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x009F)),
+    GreaseOrCipher::T(CipherSuite::Unknown(0xC030)),
     GreaseOrCipher::T(CipherSuite::Unknown(0xCCA9)),
     GreaseOrCipher::T(CipherSuite::Unknown(0xCCA8)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xCCAA)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC0AD)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC09F)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC05D)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC061)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC057)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC053)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x00A2)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC0AC)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC09E)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC05C)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC060)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC056)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC052)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC024)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x006A)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC023)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x0040)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC00A)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC014)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x0039)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x0038)),
     GreaseOrCipher::T(CipherSuite::Unknown(0xC009)),
     GreaseOrCipher::T(CipherSuite::Unknown(0xC013)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x0033)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x0032)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x009D)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC09D)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC051)),
+    GreaseOrCipher::T(CipherSuite::Unknown(0xC00A)),
+    GreaseOrCipher::T(CipherSuite::Unknown(0xC014)),
     GreaseOrCipher::T(CipherSuite::Unknown(0x009C)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC09C)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0xC050)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x003D)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x003C)),
-    GreaseOrCipher::T(CipherSuite::Unknown(0x0035)),
+    GreaseOrCipher::T(CipherSuite::Unknown(0x009D)),
     GreaseOrCipher::T(CipherSuite::Unknown(0x002F)),
+    GreaseOrCipher::T(CipherSuite::Unknown(0x0035)),
 ];
 
 // ---------------------------------------------------------------------------
-// Node.js 扩展列表（12 个，精确顺序匹配 tls.peet.ws 实测）
+// Node.js 扩展列表（14 个，精确顺序对齐真实 claude-cli/2.1.183 抓取的 JA3）
 // ---------------------------------------------------------------------------
 #[dynamic]
 pub static NODEJS_EXTENSION: Vec<ExtensionSpec> = {
     use ExtensionSpec::*;
     use KeepExtension::*;
     vec![
-        // 1. renegotiation_info (65281)
-        Craft(CraftExtension::RenegotiationInfo),
-        // 2. server_name (0)
+        // 1. server_name (0)
         Keep(Must(ExtensionType::ServerName)),
-        // 3. ec_point_formats (11)
+        // 2. extended_master_secret (23)
+        Rustls(ClientExtension::ExtendedMasterSecretRequest),
+        // 3. renegotiation_info (65281)
+        Craft(CraftExtension::RenegotiationInfo),
+        // 4. supported_groups (10) — 仅 3 条经典曲线，无后量子/无 X448/无 FFDHE
+        Rustls(ClientExtension::NamedGroups(vec![
+            NamedGroup::X25519,    // 29
+            NamedGroup::secp256r1, // 23
+            NamedGroup::secp384r1, // 24
+        ])),
+        // 5. ec_point_formats (11) — 仅 uncompressed
         Rustls(ClientExtension::EcPointFormats(vec![
             ECPointFormat::Uncompressed,
-            ECPointFormat::ANSIX962CompressedPrime,
-            ECPointFormat::ANSIX962CompressedChar2,
         ])),
-        // 4. supported_groups (10)
-        Rustls(ClientExtension::NamedGroups(vec![
-            NamedGroup::Unknown(0x11EC), // X25519MLKEM768
-            NamedGroup::X25519,
-            NamedGroup::secp256r1,
-            NamedGroup::Unknown(0x001E), // X448
-            NamedGroup::secp384r1,
-            NamedGroup::secp521r1,
-            NamedGroup::FFDHE2048,
-            NamedGroup::FFDHE3072,
-        ])),
-        // 5. session_ticket (35)
+        // 6. session_ticket (35)
         Keep(OrDefault(
             ExtensionType::SessionTicket,
             ClientExtension::SessionTicket(
                 rustls::internal::msgs::handshake::ClientSessionTicket::Offer(Payload(vec![])),
             ),
         )),
-        // 6. ALPN (16)
+        // 7. ALPN (16)
         Craft(CraftExtension::Protocols(&[b"http/1.1"])),
-        // 7. encrypt_then_mac (22)
+        // 8. status_request (5) — OCSP: status_type=1，空 responder/extensions
         Rustls(ClientExtension::Unknown(
             rustls::internal::msgs::handshake::UnknownExtension {
-                typ: ExtensionType::Unknown(22),
-                payload: Payload(vec![]),
+                typ: ExtensionType::Unknown(5),
+                payload: Payload(vec![0x01, 0x00, 0x00, 0x00, 0x00]),
             },
         )),
-        // 8. extended_master_secret (23)
-        Rustls(ClientExtension::ExtendedMasterSecretRequest),
-        // 9. signature_algorithms (13)
+        // 9. signature_algorithms (13) — 9 项，对齐真实 claude-cli/2.1.183
         Rustls(ClientExtension::SignatureAlgorithms(vec![
-            SignatureScheme::Unknown(0x0905),
-            SignatureScheme::Unknown(0x0906),
-            SignatureScheme::Unknown(0x0904),
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::Unknown(0x0603),
-            SignatureScheme::Unknown(0x0807),
-            SignatureScheme::Unknown(0x0808),
-            SignatureScheme::Unknown(0x081a),
-            SignatureScheme::Unknown(0x081b),
-            SignatureScheme::Unknown(0x081c),
-            SignatureScheme::Unknown(0x0809),
-            SignatureScheme::Unknown(0x080a),
-            SignatureScheme::Unknown(0x080b),
-            SignatureScheme::Unknown(0x0804),
-            SignatureScheme::Unknown(0x0805),
-            SignatureScheme::Unknown(0x0806),
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::Unknown(0x0303),
-            SignatureScheme::Unknown(0x0301),
-            SignatureScheme::Unknown(0x0302),
-            SignatureScheme::Unknown(0x0402),
-            SignatureScheme::Unknown(0x0502),
-            SignatureScheme::Unknown(0x0602),
+            SignatureScheme::ECDSA_NISTP256_SHA256, // 0x0403
+            SignatureScheme::RSA_PSS_SHA256,        // 0x0804
+            SignatureScheme::RSA_PKCS1_SHA256,      // 0x0401
+            SignatureScheme::ECDSA_NISTP384_SHA384, // 0x0503
+            SignatureScheme::RSA_PSS_SHA384,        // 0x0805
+            SignatureScheme::RSA_PKCS1_SHA384,      // 0x0501
+            SignatureScheme::RSA_PSS_SHA512,        // 0x0806
+            SignatureScheme::RSA_PKCS1_SHA512,      // 0x0601
+            SignatureScheme::RSA_PKCS1_SHA1,        // 0x0201
         ])),
-        // 10. supported_versions (43)
+        // 10. signed_certificate_timestamp (18)
+        Craft(CraftExtension::SignedCertificateTimestamp),
+        // 11. key_share (51) — X25519
+        Craft(CraftExtension::KeyShare(&[GreaseOrCurve::T(
+            NamedGroup::X25519,
+        )])),
+        // 12. psk_key_exchange_modes (45)
+        Rustls(ClientExtension::PresharedKeyModes(vec![
+            PSKKeyExchangeMode::PSK_DHE_KE,
+        ])),
+        // 13. supported_versions (43) — TLS 1.3, 1.2
         Craft(CraftExtension::SupportedVersions(static_ref!(
             &[
                 GreaseOrVersion::T(ProtocolVersion::TLSv1_3),
@@ -289,14 +241,8 @@ pub static NODEJS_EXTENSION: Vec<ExtensionSpec> = {
             ],
             &[GreaseOrVersion]
         ))),
-        // 11. psk_key_exchange_modes (45)
-        Rustls(ClientExtension::PresharedKeyModes(vec![
-            PSKKeyExchangeMode::PSK_DHE_KE,
-        ])),
-        // 12. key_share (51)
-        Craft(CraftExtension::KeyShare(&[GreaseOrCurve::T(
-            NamedGroup::X25519,
-        )])),
+        // 14. padding (21)
+        Craft(CraftExtension::Padding),
     ]
 };
 

@@ -550,18 +550,17 @@ pub struct CraftPadding {
 impl Codec for CraftPadding {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let unpadded = self.psk_len + bytes.len() - 4;
-        if unpadded > 0xff && unpadded < 0x200 {
-            let mut padding_len = 0x200 - unpadded;
-            if padding_len > 4 {
-                padding_len -= 4;
-            } else {
-                padding_len = 1
-            }
-            bytes.resize(bytes.len() + padding_len, 0);
+        // 真实 OpenSSL/node 客户端始终带 padding 扩展（不足 512 字节时补到 512）。
+        // 原实现仅在 256<size<512 时才补、否则删掉整个扩展，导致本项目精简后的 node
+        // 指纹（hello 较小）丢失 ext(21)，JA3/JA4 与真实 claude-cli 不符。
+        // 这里改为始终保留该扩展：不足 512 补到 512，已达/超过 512 则补最小占位。
+        let mut padding_len = if unpadded < 0x200 { 0x200 - unpadded } else { 4 };
+        if padding_len > 4 {
+            padding_len -= 4;
         } else {
-            // A dirty trick to delete the already written ext type and size.
-            bytes.resize(bytes.len() - 4, 0);
+            padding_len = 1;
         }
+        bytes.resize(bytes.len() + padding_len, 0);
     }
 
     fn read(_: &mut crate::msgs::codec::Reader) -> Result<Self, crate::InvalidMessage> {
