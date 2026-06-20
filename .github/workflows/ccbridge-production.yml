@@ -1,0 +1,90 @@
+# cc-bridge 生产构建与部署。
+#
+# 放置位置:Go1c/cc-bridge 仓库 .github/workflows/ccbridge-production.yml(publish 分支)。
+# 与 cliproxyapi-production.yml 同构:push publish -> 构建多阶段镜像推 ghcr -> SSH 滚动部署。
+#
+# 镜像名固定为我方命名空间 ghcr.io/go1c/cc-bridge(不读仓库 .version 的 silentflower 名)。
+# Dockerfile(docker/Dockerfile)自带前端构建 + Rust 编译,context 为仓库根。
+#
+# 部署门控:手动 dispatch 勾选 deploy=true,或 push 且仓库变量 PRODUCTION_DEPLOY_ENABLED=true。
+# 复用 secrets:PROD_SSH_KEY / PROD_SSH_KNOWN_HOSTS / PROD_HOST / PROD_USER。
+name: Deploy cc-bridge Production
+
+on:
+  push:
+    branches:
+      - publish
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy to production after building the image
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/go1c/cc-bridge
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ccbridge-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:production
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Prepare SSH
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.deploy == true) || (github.event_name == 'push' && vars.PRODUCTION_DEPLOY_ENABLED == 'true') }}
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$PROD_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ -n "$PROD_SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "$PROD_HOST" > ~/.ssh/known_hosts
+          fi
+
+      - name: Deploy
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.deploy == true) || (github.event_name == 'push' && vars.PRODUCTION_DEPLOY_ENABLED == 'true') }}
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+        run: |
+          ssh "${PROD_USER:-deploy}@${PROD_HOST}" \
+            "/opt/lumio/bin/deploy-service.sh ccbridge '${{ env.IMAGE_NAME }}:sha-${{ github.sha }}' '${{ github.sha }}'"
