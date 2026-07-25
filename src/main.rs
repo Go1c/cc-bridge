@@ -97,6 +97,10 @@ async fn main() {
     ));
     // 启动时加载评分权重到内存缓存
     account_svc.reload_score_weights().await;
+    account_svc
+        .reload_antifraud_policy()
+        .await
+        .expect("load antifraud policy failed");
     let rewriter = Arc::new(service::rewriter::Rewriter::new());
     let telemetry_svc = Arc::new(service::telemetry::TelemetryService::new(
         account_store.clone(),

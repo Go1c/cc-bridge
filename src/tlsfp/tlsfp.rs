@@ -147,7 +147,7 @@ macro_rules! static_ref {
 }
 
 // ---------------------------------------------------------------------------
-// Node.js 密码套件（17 个，对齐真实 claude-cli/2.1.183 抓取的 JA3）
+// Bun/Node 密码套件（17 个，对齐本机 claude-cli/2.1.211 真实 ClientHello）
 // 顺序：TLS1.3(1301,1302,1303) → ECDHE-GCM → ChaCha20 → ECDHE-CBC → RSA-GCM → RSA-CBC
 // ---------------------------------------------------------------------------
 #[dynamic]
@@ -172,7 +172,14 @@ pub static NODEJS_CIPHER: Vec<GreaseOrCipher> = vec![
 ];
 
 // ---------------------------------------------------------------------------
-// Node.js 扩展列表（14 个，精确顺序对齐真实 claude-cli/2.1.183 抓取的 JA3）
+// Bun/Node 扩展列表（对齐本机 claude-cli/2.1.211 真实 ClientHello）
+//
+// 抓包确认：
+// - ALPN 仅 `http/1.1`（无 h2）
+// - groups = X25519, secp256r1, secp384r1
+// - key_share 仅 X25519
+// - **无 padding(21)**（旧 2.1.183 画像含 padding，2.1.211 已去掉）
+// - 带 SNI 时 JA3 hash = dc782a9d905fdcee1223a3d4e8108bc6
 // ---------------------------------------------------------------------------
 #[dynamic]
 pub static NODEJS_EXTENSION: Vec<ExtensionSpec> = {
@@ -211,7 +218,7 @@ pub static NODEJS_EXTENSION: Vec<ExtensionSpec> = {
                 payload: Payload(vec![0x01, 0x00, 0x00, 0x00, 0x00]),
             },
         )),
-        // 9. signature_algorithms (13) — 9 项，对齐真实 claude-cli/2.1.183
+        // 9. signature_algorithms (13) — 9 项，对齐真实 claude-cli/2.1.211
         Rustls(ClientExtension::SignatureAlgorithms(vec![
             SignatureScheme::ECDSA_NISTP256_SHA256, // 0x0403
             SignatureScheme::RSA_PSS_SHA256,        // 0x0804
@@ -241,8 +248,7 @@ pub static NODEJS_EXTENSION: Vec<ExtensionSpec> = {
             ],
             &[GreaseOrVersion]
         ))),
-        // 14. padding (21)
-        Craft(CraftExtension::Padding),
+        // 注意：2.1.211 真实 ClientHello **不含 padding(21)**。
     ]
 };
 

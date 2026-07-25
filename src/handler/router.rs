@@ -29,9 +29,14 @@ use crate::service::rewriter::{CacheControlTtlRewrite, MessageCacheControlRewrit
 use crate::service::telemetry::TelemetryService;
 use crate::store::prime_log_store::PrimeLogStore;
 use crate::store::settings_store::{
-    DEFAULT_BOOTSTRAP_ADDITIONAL_MODEL_OPTIONS, DEFAULT_BOOTSTRAP_MODEL_OPTIONS_MODE,
-    DEFAULT_CACHE_CONTROL_TTL_REWRITE, DEFAULT_INTERCEPT_ASSISTANT_PREFILL_ENABLED,
-    DEFAULT_INTERCEPT_ASSISTANT_PREFILL_MODELS, DEFAULT_INTERCEPT_AUTO_MODE_CLASSIFIER_STAGE1_MODE,
+    DEFAULT_ANTIFRAUD_DEFAULT_AUTO_TELEMETRY, DEFAULT_ANTIFRAUD_GATE_ENABLED,
+    DEFAULT_ANTIFRAUD_MAX_ACCOUNTS_PER_PROXY, DEFAULT_ANTIFRAUD_PROXY_PROBE_TTL_SECS,
+    DEFAULT_ANTIFRAUD_REQUIRE_IDENTITY, DEFAULT_ANTIFRAUD_REQUIRE_PROXY,
+    DEFAULT_ANTIFRAUD_WARMUP_CONCURRENCY, DEFAULT_ANTIFRAUD_WARMUP_HOURS,
+    DEFAULT_ANTIFRAUD_WARMUP_RPM, DEFAULT_BOOTSTRAP_ADDITIONAL_MODEL_OPTIONS,
+    DEFAULT_BOOTSTRAP_MODEL_OPTIONS_MODE, DEFAULT_CACHE_CONTROL_TTL_REWRITE,
+    DEFAULT_INTERCEPT_ASSISTANT_PREFILL_ENABLED, DEFAULT_INTERCEPT_ASSISTANT_PREFILL_MODELS,
+    DEFAULT_INTERCEPT_AUTO_MODE_CLASSIFIER_STAGE1_MODE,
     DEFAULT_INTERCEPT_AUTO_MODE_CLASSIFIER_STAGE2_MODE,
     DEFAULT_INTERCEPT_WARMUP_HAIKU_PROBE_ENABLED, DEFAULT_INTERCEPT_WARMUP_SUGGESTION_ENABLED,
     DEFAULT_INTERCEPT_WARMUP_TITLE_ENABLED, DEFAULT_LOG_429_REQUEST_BODY_LIMIT,
@@ -108,6 +113,11 @@ pub fn build_router(
         )
         .route("/admin/accounts/:id/test", post(test_account))
         .route("/admin/accounts/:id/usage", post(refresh_usage))
+        .route(
+            "/admin/accounts/:id/antifraud-probe",
+            post(probe_account_proxy),
+        )
+        .route("/admin/antifraud/health", get(antifraud_health))
         .route("/admin/tokens", get(list_tokens).post(create_token))
         .route(
             "/admin/tokens/:id",
@@ -211,6 +221,10 @@ async fn list_accounts(
         .await?;
     let total_pages = (total + page_size - 1) / page_size;
 
+    // 全量账号用于同代理密度（仅 active 计数），避免分页低估。
+    let all_for_density = state.account_svc.list_accounts().await.unwrap_or_default();
+    let density = state.account_svc.antifraud().proxy_density(&all_for_density);
+
     // 为每个账号附加遥测会话过期时间 + 调度评分信息
     let mut data: Vec<serde_json::Value> = Vec::with_capacity(accounts.len());
     for a in &accounts {
@@ -249,7 +263,28 @@ async fn list_accounts(
             obj["rpm_remaining"] = serde_json::json!(rpm.remaining);
             obj["rpm_window_reset_at"] = serde_json::json!(rpm.window_reset_at.to_rfc3339());
             obj["rpm_saturated"] = serde_json::json!(rpm.saturated);
+            obj["rpm_limit_effective"] = serde_json::json!(rpm.limit);
         }
+        let proxy_key = crate::service::antifraud::normalize_proxy_url(&a.proxy_url);
+        let cohort = if proxy_key.is_empty() {
+            0
+        } else {
+            *density.get(&proxy_key).unwrap_or(&0)
+        };
+        let report = state
+            .account_svc
+            .antifraud()
+            .report_account(a, cohort, None)
+            .await;
+        obj["antifraud"] = serde_json::json!({
+            "ok": report.antifraud_ok,
+            "hard_block": report.hard_block,
+            "warmup_active": report.warmup_active,
+            "effective_concurrency": report.effective_concurrency,
+            "effective_rpm_limit": report.effective_rpm_limit,
+            "findings": report.findings,
+            "proxy_cohort_size": report.proxy_cohort_size,
+        });
         data.push(obj);
     }
 
@@ -504,6 +539,60 @@ async fn refresh_usage(
             ))
         }
     }
+}
+
+/// 全量防封体检总览（含同代理密度；不含实时出口探测）。
+async fn antifraud_health(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let accounts = state.account_svc.list_accounts().await?;
+    let reports = state.account_svc.antifraud().report_accounts(&accounts).await;
+    let hard_blocked = reports.iter().filter(|r| r.hard_block).count();
+    let warn_count = reports
+        .iter()
+        .filter(|r| {
+            !r.hard_block
+                && r.findings
+                    .iter()
+                    .any(|f| f.severity == crate::service::antifraud::FindingSeverity::Warn)
+        })
+        .count();
+    Ok(Json(serde_json::json!({
+        "summary": {
+            "total": reports.len(),
+            "hard_blocked": hard_blocked,
+            "with_warnings": warn_count,
+            "healthy": reports.iter().filter(|r| r.antifraud_ok).count(),
+        },
+        "accounts": reports,
+    })))
+}
+
+/// 对单个账号代理做出口 IP 探测，并返回合并体检报告。
+async fn probe_account_proxy(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let account = state.account_svc.get_account(id).await?;
+    let all = state.account_svc.list_accounts().await.unwrap_or_default();
+    let density = state.account_svc.antifraud().proxy_density(&all);
+    let proxy_key = crate::service::antifraud::normalize_proxy_url(&account.proxy_url);
+    let cohort = if proxy_key.is_empty() {
+        0
+    } else {
+        *density.get(&proxy_key).unwrap_or(&0)
+    };
+    let probe = state
+        .account_svc
+        .antifraud()
+        .probe_proxy_exit_ip(&account.proxy_url)
+        .await?;
+    let report = state
+        .account_svc
+        .antifraud()
+        .report_account(&account, cohort, Some(probe))
+        .await;
+    Ok(Json(serde_json::to_value(report).unwrap_or_default()))
 }
 
 // --- Token Handlers ---
@@ -797,6 +886,33 @@ async fn get_settings(State(state): State<AppState>) -> Result<Json<serde_json::
     settings
         .entry("bootstrap_additional_model_options".into())
         .or_insert_with(|| DEFAULT_BOOTSTRAP_ADDITIONAL_MODEL_OPTIONS.to_string());
+    settings
+        .entry("antifraud_gate_enabled".into())
+        .or_insert_with(|| DEFAULT_ANTIFRAUD_GATE_ENABLED.to_string());
+    settings
+        .entry("antifraud_require_proxy".into())
+        .or_insert_with(|| DEFAULT_ANTIFRAUD_REQUIRE_PROXY.to_string());
+    settings
+        .entry("antifraud_require_identity".into())
+        .or_insert_with(|| DEFAULT_ANTIFRAUD_REQUIRE_IDENTITY.to_string());
+    settings
+        .entry("antifraud_max_accounts_per_proxy".into())
+        .or_insert_with(|| DEFAULT_ANTIFRAUD_MAX_ACCOUNTS_PER_PROXY.to_string());
+    settings
+        .entry("antifraud_warmup_hours".into())
+        .or_insert_with(|| DEFAULT_ANTIFRAUD_WARMUP_HOURS.to_string());
+    settings
+        .entry("antifraud_warmup_concurrency".into())
+        .or_insert_with(|| DEFAULT_ANTIFRAUD_WARMUP_CONCURRENCY.to_string());
+    settings
+        .entry("antifraud_warmup_rpm".into())
+        .or_insert_with(|| DEFAULT_ANTIFRAUD_WARMUP_RPM.to_string());
+    settings
+        .entry("antifraud_default_auto_telemetry".into())
+        .or_insert_with(|| DEFAULT_ANTIFRAUD_DEFAULT_AUTO_TELEMETRY.to_string());
+    settings
+        .entry("antifraud_proxy_probe_ttl_secs".into())
+        .or_insert_with(|| DEFAULT_ANTIFRAUD_PROXY_PROBE_TTL_SECS.to_string());
     Ok(Json(serde_json::json!(settings)))
 }
 
@@ -860,6 +976,38 @@ async fn update_settings(
     }
     if let Some(val) = body.get("allowed_user_agents") {
         validate_user_agent_patterns(val)?;
+    }
+    // 防封策略开关
+    for key in &[
+        "antifraud_gate_enabled",
+        "antifraud_require_proxy",
+        "antifraud_require_identity",
+        "antifraud_default_auto_telemetry",
+    ] {
+        if let Some(val) = body.get(*key) {
+            if val != "true" && val != "false" {
+                return Err(AppError::BadRequest(format!(
+                    "'{}' 必须是 true 或 false",
+                    key
+                )));
+            }
+        }
+    }
+    for key in &[
+        "antifraud_max_accounts_per_proxy",
+        "antifraud_warmup_hours",
+        "antifraud_warmup_concurrency",
+        "antifraud_warmup_rpm",
+        "antifraud_proxy_probe_ttl_secs",
+    ] {
+        if let Some(val) = body.get(*key) {
+            match val.parse::<i64>() {
+                Ok(v) if v >= 0 => {}
+                _ => {
+                    return Err(AppError::BadRequest(format!("'{}' 必须是非负整数", key)));
+                }
+            }
+        }
     }
     // 系统提示词环境透传开关:仅允许 "true" / "false"
     for key in &[
@@ -1008,6 +1156,9 @@ async fn update_settings(
         || body.contains_key("bootstrap_additional_model_options")
     {
         state.gateway_svc.reload_bootstrap_profile_config().await?;
+    }
+    if body.keys().any(|k| k.starts_with("antifraud_")) {
+        state.account_svc.reload_antifraud_policy().await?;
     }
     // 通知 AccountService 刷新缓存
     state.account_svc.reload_score_weights().await;

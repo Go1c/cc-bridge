@@ -198,7 +198,7 @@ fn beta_header_for_path(path: &str, model_id: &str) -> String {
 }
 
 fn is_fable_model(model_id: &str) -> bool {
-    // 2.1.173 抓包显示 Fable `[1m]` 不会改变主请求画像，不能用后缀裁剪推断 beta。
+    // 2.1.211 抓包显示 Fable `[1m]` 不会改变主请求画像，不能用后缀裁剪推断 beta。
     model_id == FABLE_MODEL_ID
 }
 
@@ -1136,9 +1136,7 @@ impl Rewriter {
         let cc_suffix = compute_cc_version_suffix(&first_msg, version);
         let billing_block = serde_json::json!({
             "type": "text",
-            "text": format!(
-                "x-anthropic-billing-header: cc_version={version}.{cc_suffix}; cc_entrypoint=cli; cch=00000;"
-            )
+            "text": format_billing_header(version, &cc_suffix)
         });
         let banner_block = serde_json::json!({
             "type": "text",
@@ -1192,8 +1190,17 @@ impl Rewriter {
                 text = BILLING_VERSION_REGEX
                     .replace_all(&text, &format!("cc_version={}.{}", version, cch_hash))
                     .to_string();
-                // 将已有的 cch 值重置为占位符，后续在序列化后通过 xxhash64 重新计算
-                text = CCH_VALUE_REGEX.replace_all(&text, "cch=00000").to_string();
+                // 2.1.211 真实抓包不再发送 cch=；旧版本仍重置占位符供后续 xxhash 回填。
+                if billing_uses_cch(version) {
+                    text = CCH_VALUE_REGEX.replace_all(&text, "cch=00000").to_string();
+                } else {
+                    text = CCH_FIELD_REGEX.replace_all(&text, "").to_string();
+                    text = text.replace(";;", ";");
+                }
+                // 入口统一改写为当前版本真实值（2.1.211 = sdk-cli）。
+                text = BILLING_ENTRYPOINT_REGEX
+                    .replace_all(&text, &format!("cc_entrypoint={};", billing_entrypoint(version)))
+                    .to_string();
             } else if *billing_mode == BillingMode::Strip {
                 text = BILLING_LINE_REGEX.replace_all(&text, "").to_string();
                 text = BILLING_REGEX.replace_all(&text, "").to_string();
@@ -1368,7 +1375,11 @@ static BILLING_REGEX: Lazy<Regex> =
 /// 仅匹配 cc_version 值部分，用于 Rewrite 模式保留 cc_entrypoint。
 static BILLING_VERSION_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"cc_version=[\d.]+\.[a-f0-9]{3}").unwrap());
+static BILLING_ENTRYPOINT_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"cc_entrypoint=[^;]+;?").unwrap());
 static CCH_VALUE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"cch=[a-f0-9]{5}").unwrap());
+/// 匹配整段 `cch=xxxxx;` 字段（含可选分号），用于 2.1.211+ 剥离。
+static CCH_FIELD_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s*cch=[a-f0-9]{5};?").unwrap());
 static GIT_USER_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"Git user:\s*[^\n]+").unwrap());
 static SYSTEM_REMINDER_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?s)<system-reminder>(.*?)</system-reminder>").unwrap());
@@ -1406,6 +1417,10 @@ fn compute_cch_attestation(mut body: Vec<u8>, version: &str) -> Vec<u8> {
 }
 
 fn refresh_cch_attestation(mut body: Vec<u8>, version: &str) -> Vec<u8> {
+    // 2.1.211 真实客户端不再发送 cch=；若 body 里仍残留旧字段则直接剥离。
+    if !billing_uses_cch(version) {
+        return strip_cch_field_from_body_bytes(body);
+    }
     if let Some(pos) = find_cch_value(&body) {
         body[pos + 4..pos + 9].copy_from_slice(b"00000");
         compute_cch_attestation(body, version)
@@ -1414,14 +1429,58 @@ fn refresh_cch_attestation(mut body: Vec<u8>, version: &str) -> Vec<u8> {
     }
 }
 
+/// 从已序列化 body 中剥离 `cch=xxxxx` 字段（含可选分号与前后空白）。
+fn strip_cch_field_from_body_bytes(body: Vec<u8>) -> Vec<u8> {
+    let Ok(text) = String::from_utf8(body.clone()) else {
+        return body;
+    };
+    let stripped = CCH_FIELD_REGEX
+        .replace_all(&text, "")
+        .replace(";;", ";");
+    stripped.into_bytes()
+}
+
 fn cch_attestation_input(body: &[u8], version: &str) -> Vec<u8> {
-    if !matches!(normalize_version(version), "2.1.172" | "2.1.173") {
+    // 2.1.172/2.1.173 的 CCH 输入会清空顶层 model，并剔除 max_tokens/fallbacks。
+    // 2.1.211 真实客户端已不再发送 cch 字段；若旧 body 仍带占位符，沿用 173 口径以保持兼容。
+    if !matches!(
+        normalize_version(version),
+        "2.1.172" | "2.1.173" | "2.1.211"
+    ) {
         return body.to_vec();
     }
 
     let mut normalized = replace_top_level_string_value(body, "model", b"\"\"");
     normalized = remove_top_level_field(&normalized, "max_tokens");
     remove_top_level_field(&normalized, "fallbacks")
+}
+
+/// 2.1.211 真实抓包的 billing header **不含** `cch=` 字段。
+fn billing_uses_cch(version: &str) -> bool {
+    !matches!(normalize_version(version), "2.1.211")
+}
+
+/// 2.1.211 真实抓包的 `cc_entrypoint` 为 `sdk-cli`。
+fn billing_entrypoint(version: &str) -> &'static str {
+    match normalize_version(version) {
+        "2.1.211" => "sdk-cli",
+        _ => "cli",
+    }
+}
+
+/// 构造与当前 Claude Code 版本一致的 billing header 文本。
+fn format_billing_header(version: &str, cc_suffix: &str) -> String {
+    let version = normalize_version(version);
+    let entry = billing_entrypoint(version);
+    if billing_uses_cch(version) {
+        format!(
+            "x-anthropic-billing-header: cc_version={version}.{cc_suffix}; cc_entrypoint={entry}; cch=00000;"
+        )
+    } else {
+        format!(
+            "x-anthropic-billing-header: cc_version={version}.{cc_suffix}; cc_entrypoint={entry};"
+        )
+    }
 }
 
 fn find_cch_value(body: &[u8]) -> Option<usize> {
@@ -1462,7 +1521,7 @@ fn random_cc_version_suffix(bytes: [u8; 2]) -> String {
 /// 返回指定 Claude Code 版本使用的 CCH attestation seed。
 fn cch_attestation_seed(version: &str) -> u64 {
     match normalize_version(version) {
-        "2.1.156" | "2.1.169" | "2.1.172" | "2.1.173" => CCH_ATTESTATION_SEED_2156,
+        "2.1.156" | "2.1.169" | "2.1.172" | "2.1.173" | "2.1.211" => CCH_ATTESTATION_SEED_2156,
         _ => CCH_ATTESTATION_SEED_LEGACY,
     }
 }
@@ -4723,9 +4782,11 @@ fn scrub_git_user_in_reminders(body: &mut serde_json::Value, replacement_name: &
 }
 
 /// 将 canonical env 的 platform 映射为 X-Stainless-OS 值。
+///
+/// 2.1.211 真实抓包：`X-Stainless-OS: MacOS`（不是旧的 `Mac OS X`）。
 fn stainless_os_from_platform(platform: &str) -> &str {
     match platform {
-        "darwin" => "Mac OS X",
+        "darwin" => "MacOS",
         "win32" => "Windows",
         _ => "Linux",
     }
@@ -5166,23 +5227,9 @@ mod tests {
         assert!(!text.contains("cch=12345"));
         assert!(!text.contains("cch=00000"));
 
-        let actual = super::CCH_VALUE_REGEX
-            .find(&text)
-            .map(|m| m.as_str().to_string())
-            .expect("cch value exists");
-        let mut placeholder_body = out;
-        let cch_pos = placeholder_body
-            .windows(super::CCH_PLACEHOLDER.len())
-            .position(|window| window.starts_with(b"cch="))
-            .expect("cch value position");
-        placeholder_body[cch_pos + 4..cch_pos + 9].copy_from_slice(b"00000");
-        let expected = String::from_utf8(compute_cch_attestation(
-            placeholder_body,
-            DEFAULT_CLAUDE_CODE_VERSION,
-        ))
-        .unwrap();
-
-        assert!(expected.contains(&actual));
+        // 2.1.211 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
+        assert!(!text.contains("cch="));
+        assert!(text.contains("cc_entrypoint=sdk-cli;"));
     }
 
     #[test]
@@ -7665,13 +7712,16 @@ mod tests {
 
         let system = parsed["system"].as_array().expect("system array");
         assert_eq!(system.len(), 3);
+        let billing = system[0]["text"].as_str().unwrap();
         assert!(
-            system[0]["text"].as_str().unwrap().starts_with(
+            billing.starts_with(
                 format!("x-anthropic-billing-header: cc_version={DEFAULT_CLAUDE_CODE_VERSION}.")
                     .as_str()
             )
         );
-        assert!(system[0]["text"].as_str().unwrap().contains("cch="));
+        // 2.1.211 真实抓包：entrypoint=sdk-cli，且不再发送 cch=。
+        assert!(billing.contains("cc_entrypoint=sdk-cli;"));
+        assert!(!billing.contains("cch="));
         assert_eq!(system[1]["text"], json!(super::CLAUDE_CODE_SYSTEM_PROMPT));
         assert_eq!(
             system[2]["text"],
@@ -7918,7 +7968,7 @@ mod tests {
 
         assert_eq!(
             beta,
-            "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,server-side-fallback-2026-06-01,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
+            "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,effort-2025-11-24,server-side-fallback-2026-06-01,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11"
         );
     }
 
@@ -8133,23 +8183,10 @@ mod tests {
         );
         assert!(!message_cache_control_positions(&parsed).is_empty());
 
-        let actual = super::CCH_VALUE_REGEX
-            .find(&text)
-            .map(|m| m.as_str().to_string())
-            .expect("cch value exists");
-        let mut placeholder_body = out;
-        let cch_pos = placeholder_body
-            .windows(super::CCH_PLACEHOLDER.len())
-            .position(|window| window.starts_with(b"cch="))
-            .expect("cch value position");
-        placeholder_body[cch_pos + 4..cch_pos + 9].copy_from_slice(b"00000");
-        let expected = String::from_utf8(compute_cch_attestation(
-            placeholder_body,
-            DEFAULT_CLAUDE_CODE_VERSION,
-        ))
-        .unwrap();
-
-        assert!(expected.contains(&actual));
+        // 2.1.211 真实抓包不再发送 cch=；API mimicry 与本地 CLI 对齐。
+        assert!(!text.contains("cch="));
+        assert!(text.contains("cc_entrypoint=sdk-cli;"));
+        assert!(text.contains(&format!("cc_version={DEFAULT_CLAUDE_CODE_VERSION}.")));
     }
 
     #[test]
@@ -8176,7 +8213,9 @@ mod tests {
         let beta = headers.get("anthropic-beta").unwrap();
 
         assert!(beta.contains("extended-cache-ttl-2025-04-11"));
-        assert!(beta.contains("cache-diagnosis-2026-04-07"));
+        // 2.1.211 主请求 beta 不再包含 cache-diagnosis / redact-thinking / advanced-tool-use。
+        assert!(!beta.contains("cache-diagnosis-2026-04-07"));
+        assert!(!beta.contains("redact-thinking-2026-02-12"));
         assert!(!beta.contains("context-1m-2025-08-07"));
     }
 
@@ -8287,7 +8326,7 @@ mod tests {
             "",
             &body,
         );
-        assert_eq!(eval_headers.get("User-Agent").unwrap(), "Bun/1.3.14");
+        assert_eq!(eval_headers.get("User-Agent").unwrap(), "Bun/1.4.0");
 
         let trigger_headers = rewriter.rewrite_headers(
             &empty,
@@ -8735,8 +8774,24 @@ mod tests {
         assert_eq!(cch_attestation_seed("2.1.169"), 0x4D659218E32A3268);
         assert_eq!(cch_attestation_seed("2.1.172"), 0x4D659218E32A3268);
         assert_eq!(cch_attestation_seed("2.1.173"), 0x4D659218E32A3268);
+        assert_eq!(cch_attestation_seed("2.1.211"), 0x4D659218E32A3268);
         assert_eq!(cch_attestation_seed("2.1.81"), 0x6E52736AC806831E);
         assert_eq!(cch_attestation_seed("2.1.999"), 0x6E52736AC806831E);
+    }
+
+    #[test]
+    fn billing_header_for_211_matches_local_capture() {
+        let header = super::format_billing_header("2.1.211", "b7f");
+        assert_eq!(
+            header,
+            "x-anthropic-billing-header: cc_version=2.1.211.b7f; cc_entrypoint=sdk-cli;"
+        );
+        assert!(!header.contains("cch="));
+        assert_eq!(
+            claude_cli_user_agent("2.1.211"),
+            "claude-cli/2.1.211 (external, sdk-cli)"
+        );
+        assert_eq!(super::stainless_os_from_platform("darwin"), "MacOS");
     }
 
     #[test]
@@ -8796,8 +8851,9 @@ mod tests {
 
     #[test]
     fn cch_refresh_recomputes_existing_value_after_retry_body_change() {
+        // 旧版本仍会重算 cch。
         let body = br#"{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.156.b94; cc_entrypoint=cli; cch=40943;"}],"messages":[{"role":"assistant","content":[{"type":"text","text":"sanitized"}]}]}"#;
-        let out = super::refresh_cch_attestation(body.to_vec(), DEFAULT_CLAUDE_CODE_VERSION);
+        let out = super::refresh_cch_attestation(body.to_vec(), "2.1.156");
         let text = String::from_utf8(out).unwrap();
 
         assert!(!text.contains("cch=40943"));
@@ -8806,34 +8862,28 @@ mod tests {
     }
 
     #[test]
+    fn cch_refresh_strips_cch_for_211() {
+        let body = br#"{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.211.b7f; cc_entrypoint=sdk-cli; cch=40943;"}],"messages":[]}"#;
+        let out = super::refresh_cch_attestation(body.to_vec(), "2.1.211");
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("cch="));
+        assert!(text.contains("cc_entrypoint=sdk-cli;"));
+    }
+
+    #[test]
     fn api_cch_refresh_ignores_account_billing_mode_after_retry_body_change() {
         let mut account = test_account();
         account.billing_mode = BillingMode::Strip;
         let rewriter = Rewriter::new();
-        let body = br#"{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.156.b94; cc_entrypoint=cli; cch=40943;"}],"messages":[{"role":"assistant","content":[{"type":"text","text":"api sanitized"}]}]}"#;
+        // 默认账号版本已是 2.1.211：refresh 应剥离残留 cch。
+        let body = br#"{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.211.b7f; cc_entrypoint=sdk-cli; cch=40943;"}],"messages":[{"role":"assistant","content":[{"type":"text","text":"api sanitized"}]}]}"#;
         let out = rewriter.refresh_cch_attestation(body.to_vec(), &account, ClientType::API);
         let text = String::from_utf8(out.clone()).unwrap();
 
         assert!(!text.contains("cch=40943"));
         assert!(!text.contains("cch=00000"));
-
-        let actual = super::CCH_VALUE_REGEX
-            .find(&text)
-            .map(|m| m.as_str().to_string())
-            .expect("cch value exists");
-        let mut placeholder_body = out;
-        let cch_pos = placeholder_body
-            .windows(super::CCH_PLACEHOLDER.len())
-            .position(|window| window.starts_with(b"cch="))
-            .expect("cch value position");
-        placeholder_body[cch_pos + 4..cch_pos + 9].copy_from_slice(b"00000");
-        let expected = String::from_utf8(compute_cch_attestation(
-            placeholder_body,
-            DEFAULT_CLAUDE_CODE_VERSION,
-        ))
-        .unwrap();
-
-        assert!(expected.contains(&actual));
+        assert!(!text.contains("cch="));
+        assert!(text.contains("cc_entrypoint=sdk-cli;"));
     }
 
     #[test]
@@ -8901,23 +8951,9 @@ mod tests {
             json!("5m")
         );
 
-        let actual = super::CCH_VALUE_REGEX
-            .find(&text)
-            .map(|m| m.as_str().to_string())
-            .expect("cch value exists");
-        let mut placeholder_body = out;
-        let cch_pos = placeholder_body
-            .windows(super::CCH_PLACEHOLDER.len())
-            .position(|window| window.starts_with(b"cch="))
-            .expect("cch value position");
-        placeholder_body[cch_pos + 4..cch_pos + 9].copy_from_slice(b"00000");
-        let expected = String::from_utf8(compute_cch_attestation(
-            placeholder_body,
-            DEFAULT_CLAUDE_CODE_VERSION,
-        ))
-        .unwrap();
-
-        assert!(expected.contains(&actual));
+        // 2.1.211 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
+        assert!(!text.contains("cch="));
+        assert!(text.contains("cc_entrypoint=sdk-cli;"));
     }
 
     #[test]
@@ -8959,23 +8995,9 @@ mod tests {
         assert!(!text.contains("cch=00000"));
         assert_eq!(message_cache_control_positions(&parsed).len(), 4);
 
-        let actual = super::CCH_VALUE_REGEX
-            .find(&text)
-            .map(|m| m.as_str().to_string())
-            .expect("cch value exists");
-        let mut placeholder_body = out;
-        let cch_pos = placeholder_body
-            .windows(super::CCH_PLACEHOLDER.len())
-            .position(|window| window.starts_with(b"cch="))
-            .expect("cch value position");
-        placeholder_body[cch_pos + 4..cch_pos + 9].copy_from_slice(b"00000");
-        let expected = String::from_utf8(compute_cch_attestation(
-            placeholder_body,
-            DEFAULT_CLAUDE_CODE_VERSION,
-        ))
-        .unwrap();
-
-        assert!(expected.contains(&actual));
+        // 2.1.211 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
+        assert!(!text.contains("cch="));
+        assert!(text.contains("cc_entrypoint=sdk-cli;"));
     }
 
     #[test]
@@ -9007,23 +9029,9 @@ mod tests {
         assert!(!text.contains("cch=00000"));
         assert_eq!(message_cache_control_positions(&parsed).len(), 4);
 
-        let actual = super::CCH_VALUE_REGEX
-            .find(&text)
-            .map(|m| m.as_str().to_string())
-            .expect("cch value exists");
-        let mut placeholder_body = out;
-        let cch_pos = placeholder_body
-            .windows(super::CCH_PLACEHOLDER.len())
-            .position(|window| window.starts_with(b"cch="))
-            .expect("cch value position");
-        placeholder_body[cch_pos + 4..cch_pos + 9].copy_from_slice(b"00000");
-        let expected = String::from_utf8(compute_cch_attestation(
-            placeholder_body,
-            DEFAULT_CLAUDE_CODE_VERSION,
-        ))
-        .unwrap();
-
-        assert!(expected.contains(&actual));
+        // 2.1.211 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
+        assert!(!text.contains("cch="));
+        assert!(text.contains("cc_entrypoint=sdk-cli;"));
     }
 
     #[test]

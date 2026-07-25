@@ -22,6 +22,34 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return res.json()
 }
 
+export interface AntifraudFinding {
+  code: string
+  severity: 'info' | 'warn' | 'error'
+  message: string
+}
+
+export interface AntifraudReport {
+  account_id: number
+  email: string
+  status: string
+  schedulable_by_status: boolean
+  antifraud_ok: boolean
+  hard_block: boolean
+  findings: AntifraudFinding[]
+  proxy_normalized: string
+  proxy_cohort_size: number
+  warmup_active: boolean
+  effective_concurrency: number
+  effective_rpm_limit: number
+  proxy_probe?: {
+    ok: boolean
+    exit_ip: string
+    latency_ms: number
+    error: string
+    probed_at: string
+  } | null
+}
+
 export interface Account {
   id: number
   name: string
@@ -55,6 +83,7 @@ export interface Account {
   rpm_remaining?: number | null
   rpm_window_reset_at?: string
   rpm_saturated?: boolean
+  rpm_limit_effective?: number
   auto_telemetry: boolean
   auto_poll_usage: boolean
   allow_1m_models: string
@@ -80,6 +109,16 @@ export interface Account {
   usage_fetched_at?: string
   created_at: string
   updated_at: string
+  /** 列表页附带的防封体检摘要 */
+  antifraud?: {
+    ok: boolean
+    hard_block: boolean
+    warmup_active: boolean
+    effective_concurrency: number
+    effective_rpm_limit: number
+    findings: AntifraudFinding[]
+    proxy_cohort_size: number
+  }
 }
 
 export interface PagedResult<T> {
@@ -156,6 +195,14 @@ export const api = {
   deleteAccount: (id: number) => request<void>('DELETE', `/admin/accounts/${id}`),
   testAccount: (id: number) => request<{ status: string; message?: string }>('POST', `/admin/accounts/${id}/test`),
   refreshUsage: (id: number) => request<{ status: string; usage?: UsageData; message?: string }>('POST', `/admin/accounts/${id}/usage`),
+  /** 全量防封体检总览 */
+  getAntifraudHealth: () =>
+    request<{
+      summary: { total: number; hard_blocked: number; with_warnings: number; healthy: number }
+      accounts: AntifraudReport[]
+    }>('GET', '/admin/antifraud/health'),
+  /** 单账号代理出口探测 + 合并体检 */
+  probeAccountProxy: (id: number) => request<AntifraudReport>('POST', `/admin/accounts/${id}/antifraud-probe`),
   listTokens: (page = 1, pageSize = 20) =>
     request<PagedResult<ApiToken>>('GET', `/admin/tokens?page=${page}&page_size=${pageSize}`),
   createToken: (t: Partial<ApiToken>) => request<ApiToken>('POST', '/admin/tokens', t),

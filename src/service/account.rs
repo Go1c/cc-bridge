@@ -337,6 +337,8 @@ pub struct AccountService {
     /// 评分权重缓存 (w7d, w5h, w_concurrency)，更新设置后刷新。
     score_weights: RwLock<(f64, f64, f64)>,
     settings_store: Arc<crate::store::settings_store::SettingsStore>,
+    /// 防封体检与调度门禁。
+    antifraud: Arc<crate::service::antifraud::AntifraudService>,
     /// 账号级 FIFO 排队器缓存：account_id → queue。
     ///
     /// 懒创建(首次调用 `get_or_create_queue` 时建);admin 修改账号 concurrency 后
@@ -355,14 +357,28 @@ impl AccountService {
         cache: Arc<dyn CacheStore>,
         settings_store: Arc<crate::store::settings_store::SettingsStore>,
     ) -> Self {
+        let antifraud = Arc::new(crate::service::antifraud::AntifraudService::new(
+            settings_store.clone(),
+        ));
         Self {
             store,
             cache,
             score_weights: RwLock::new((DEFAULT_W7D, DEFAULT_W5H, DEFAULT_WCONC)),
             settings_store,
+            antifraud,
             queues: RwLock::new(HashMap::new()),
             transient_rate_limit_backoffs: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// 防封服务引用（管理端体检 / 策略刷新）。
+    pub fn antifraud(&self) -> Arc<crate::service::antifraud::AntifraudService> {
+        self.antifraud.clone()
+    }
+
+    /// 启动或设置变更后刷新防封策略。
+    pub async fn reload_antifraud_policy(&self) -> Result<(), AppError> {
+        self.antifraud.reload_policy().await
     }
 
     /// 从数据库加载评分权重到内存缓存，启动时和更新设置后调用。
@@ -413,6 +429,14 @@ impl AccountService {
             && a.billing_mode.to_string() == "strip"
         {
             // default already strip
+        }
+
+        // OAuth 账号默认开启 auto_telemetry（可被创建请求显式覆盖；此处仅在仍为 false 且策略开启时补开）
+        if a.auth_type == crate::model::account::AccountAuthType::Oauth && !a.auto_telemetry {
+            let pol = self.antifraud.policy().await;
+            if pol.default_auto_telemetry {
+                a.auto_telemetry = true;
+            }
         }
 
         normalize_account_auth(a)?;
@@ -598,9 +622,13 @@ impl AccountService {
                     if let Ok(account) = self.store.get_by_id(account_id).await {
                         let id_allowed =
                             allowed_ids.is_empty() || allowed_ids.contains(&account_id);
+                        let antifraud_ok = !self
+                            .is_antifraud_hard_blocked(&account)
+                            .await;
                         if account.is_schedulable()
                             && !exclude_ids.contains(&account_id)
                             && id_allowed
+                            && antifraud_ok
                         {
                             // 粘性命中：刷新 TTL，保持活跃会话不过期
                             let _ = self
@@ -626,15 +654,28 @@ impl AccountService {
 
         // 获取可调度账号
         let accounts = self.store.list_schedulable().await?;
+        let density = self.antifraud.proxy_density(&accounts);
 
-        // 过滤：排除项 + 可用账号限制
-        let mut candidates: Vec<Account> = accounts
-            .into_iter()
-            .filter(|a| {
-                !exclude_ids.contains(&a.id)
-                    && (allowed_ids.is_empty() || allowed_ids.contains(&a.id))
-            })
-            .collect();
+        // 过滤：排除项 + 可用账号限制 + 防封硬伤
+        let mut candidates: Vec<Account> = Vec::new();
+        for a in accounts {
+            if exclude_ids.contains(&a.id) {
+                continue;
+            }
+            if !(allowed_ids.is_empty() || allowed_ids.contains(&a.id)) {
+                continue;
+            }
+            let key = crate::service::antifraud::normalize_proxy_url(&a.proxy_url);
+            let cohort = if key.is_empty() {
+                0
+            } else {
+                *density.get(&key).unwrap_or(&0)
+            };
+            if self.antifraud.is_hard_blocked(&a, cohort).await {
+                continue;
+            }
+            candidates.push(a);
+        }
 
         // 新会话优先避开当前分钟 RPM 已满账号；若全部已满，保留候选交给后续 admission 等待/拒绝。
         let rpm_available = self.filter_rpm_available(&candidates).await;
@@ -693,7 +734,8 @@ impl AccountService {
     async fn filter_rpm_available(&self, accounts: &[Account]) -> Vec<Account> {
         let mut available = Vec::with_capacity(accounts.len());
         for account in accounts {
-            if account.rpm_limit <= 0 {
+            let limit = self.effective_rpm_limit(account).await;
+            if limit <= 0 {
                 available.push(account.clone());
                 continue;
             }
@@ -717,13 +759,28 @@ impl AccountService {
         available
     }
 
+    /// 账号有效 RPM（含 warm-up 上限）。
+    pub async fn effective_rpm_limit(&self, account: &Account) -> i32 {
+        self.antifraud.effective_rpm_limit(account).await
+    }
+
+    /// 账号有效并发（含 warm-up 上限）。
+    pub async fn effective_concurrency(&self, account: &Account) -> i32 {
+        self.antifraud.effective_concurrency(account).await
+    }
+
+    async fn is_antifraud_hard_blocked(&self, account: &Account) -> bool {
+        // 单账号快速路径：仅用自身 proxy 无法算全局密度，密度告警不硬拒。
+        self.antifraud.is_hard_blocked(account, 1).await
+    }
+
     /// 返回账号当前分钟 RPM 状态。读取失败由调用方决定是否失败开放。
     pub async fn get_account_rpm_status(
         &self,
         account: &Account,
     ) -> Result<AccountRpmStatus, AppError> {
         let (minute_ts, reset_at) = current_rpm_window();
-        let limit = account.rpm_limit.max(0);
+        let limit = self.effective_rpm_limit(account).await.max(0);
         let current = self.cache.get_account_rpm(account.id, minute_ts).await?;
         let remaining = if limit > 0 {
             Some((limit as i64 - current).max(0))
@@ -746,7 +803,8 @@ impl AccountService {
         sticky: bool,
         session_hash: &str,
     ) -> Result<(), AppError> {
-        if account.rpm_limit <= 0 {
+        let rpm_limit = self.effective_rpm_limit(account).await;
+        if rpm_limit <= 0 {
             return Ok(());
         }
 
@@ -755,13 +813,14 @@ impl AccountService {
             let (minute_ts, reset_at) = current_rpm_window();
             match self
                 .cache
-                .try_acquire_account_rpm(account.id, minute_ts, account.rpm_limit, RPM_KEY_TTL)
+                .try_acquire_account_rpm(account.id, minute_ts, rpm_limit, RPM_KEY_TTL)
                 .await
             {
                 Ok(result) if result.acquired => {
                     self.log_rpm_action(
                         account,
                         result.current,
+                        rpm_limit,
                         sticky,
                         RpmAdmissionAction::Allow,
                         None,
@@ -773,6 +832,7 @@ impl AccountService {
                     self.log_rpm_action(
                         account,
                         result.current,
+                        rpm_limit,
                         sticky,
                         RpmAdmissionAction::Skip,
                         None,
@@ -792,6 +852,7 @@ impl AccountService {
                         self.log_rpm_action(
                             account,
                             result.current,
+                            rpm_limit,
                             sticky,
                             RpmAdmissionAction::Reject,
                             Some("wait_timeout"),
@@ -805,6 +866,7 @@ impl AccountService {
                     self.log_rpm_action(
                         account,
                         result.current,
+                        rpm_limit,
                         sticky,
                         RpmAdmissionAction::Wait,
                         Some(&format!("{}ms", wait.as_millis())),
@@ -827,6 +889,7 @@ impl AccountService {
         &self,
         account: &Account,
         current: i64,
+        rpm_limit: i32,
         sticky: bool,
         action: RpmAdmissionAction,
         detail: Option<&str>,
@@ -845,7 +908,7 @@ impl AccountService {
                 account.name,
                 account.id,
                 current,
-                account.rpm_limit,
+                rpm_limit,
                 sticky,
                 action_label,
                 detail,
@@ -853,7 +916,7 @@ impl AccountService {
             ),
             None => info!(
                 "[RPM] 账号={} id={} 当前={} 限制={} 粘性={} 动作={} session={}",
-                account.name, account.id, current, account.rpm_limit, sticky, action_label, session
+                account.name, account.id, current, rpm_limit, sticky, action_label, session
             ),
         }
     }
@@ -1206,15 +1269,16 @@ impl AccountService {
                         .effective;
                 eff_7d = eff_7d.max(eff_7d_sonnet);
             }
-            // 从 FIFO 排队器读取实时活跃/等待数
-            let queue = self.get_or_create_queue(acc.id, acc.concurrency).await;
+            // 从 FIFO 排队器读取实时活跃/等待数（容量用 warm-up 有效并发）
+            let eff_conc = self.effective_concurrency(acc).await;
+            let queue = self.get_or_create_queue(acc.id, eff_conc).await;
             let current = queue.active_count();
             let waiting = queue.waiting_count();
-            let full = acc.concurrency > 0 && current >= acc.concurrency as i64;
+            let full = eff_conc > 0 && current >= eff_conc as i64;
             // 把"排队中"的请求也作为负载计入评分:单位仍是 % concurrency,
             // 两个账号都活跃满时,排队少的负载百分比更低,优先被选中。
-            let conc_pct = if acc.concurrency > 0 {
-                ((current + waiting) as f64) / (acc.concurrency as f64) * 100.0
+            let conc_pct = if eff_conc > 0 {
+                ((current + waiting) as f64) / (eff_conc as f64) * 100.0
             } else {
                 0.0
             };
@@ -1259,9 +1323,8 @@ impl AccountService {
         let d7d = effective_utilization_detail(account, "seven_day", 7.0 * 24.0 * 3600.0, now);
 
         // 从 FIFO 排队器读取实时活跃/等待数(替代原 cache.get_slot_count 查询)
-        let queue = self
-            .get_or_create_queue(account.id, account.concurrency)
-            .await;
+        let eff_conc = self.effective_concurrency(account).await;
+        let queue = self.get_or_create_queue(account.id, eff_conc).await;
         let current_concurrency = queue.active_count();
         let queued = queue.waiting_count();
         let (transient_backoff_waiting, transient_backoff_remaining_ms) =

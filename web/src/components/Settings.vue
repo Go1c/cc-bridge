@@ -34,7 +34,7 @@ const primeModel = ref('claude-haiku-4-5-20251001');
 const allowSystemRoleModels = ref('claude-opus-4-8');
 
 /** 客户端访问策略表单 */
-const allowedClaudeCodeVersions = ref('2.1.89-2.1.173');
+const allowedClaudeCodeVersions = ref('2.1.89-2.1.999');
 const allowedUserAgents = ref('AI-Hub-Monitor*\npython-httpx*');
 
 /** 系统提示词环境字段「真值透传」开关(工作目录默认透传) */
@@ -73,6 +73,16 @@ type AutoModeClassifierMode = 'passthrough' | 'mock_allow' | 'mock_block' | 'err
 
 /** 代理 HTTP 客户端连接池复用开关 */
 const proxyClientPoolEnabled = ref(true);
+
+/** 防封策略 */
+const antifraudGateEnabled = ref(true);
+const antifraudRequireProxy = ref(true);
+const antifraudRequireIdentity = ref(true);
+const antifraudMaxAccountsPerProxy = ref('3');
+const antifraudWarmupHours = ref('24');
+const antifraudWarmupConcurrency = ref('1');
+const antifraudWarmupRpm = ref('12');
+const antifraudDefaultAutoTelemetry = ref(true);
 
 /** 预热与 Auto Mode classifier 本地处理开关 */
 const interceptWarmupTitleEnabled = ref(false);
@@ -239,7 +249,7 @@ async function loadSettings() {
     primeHours.value = data.peak_prime_hours ?? '4,5,6';
     primeModel.value = data.peak_prime_model ?? 'claude-haiku-4-5-20251001';
     allowSystemRoleModels.value = data.allow_system_role_models ?? 'claude-opus-4-8';
-    allowedClaudeCodeVersions.value = data.allowed_claude_code_versions ?? '2.1.89-2.1.173';
+    allowedClaudeCodeVersions.value = data.allowed_claude_code_versions ?? '2.1.89-2.1.999';
     allowedUserAgents.value = data.allowed_user_agents ?? 'AI-Hub-Monitor*\npython-httpx*';
     passthroughShell.value = (data.passthrough_shell ?? 'false') === 'true';
     passthroughOsVersion.value = (data.passthrough_os_version ?? 'false') === 'true';
@@ -274,6 +284,14 @@ async function loadSettings() {
     interceptWarmupHaikuProbeEnabled.value = (data.intercept_warmup_haiku_probe_enabled ?? 'false') === 'true';
     interceptAutoModeClassifierStage1Mode.value = parseAutoModeClassifierMode(data.intercept_auto_mode_classifier_stage1_mode);
     interceptAutoModeClassifierStage2Mode.value = parseAutoModeClassifierMode(data.intercept_auto_mode_classifier_stage2_mode);
+    antifraudGateEnabled.value = (data.antifraud_gate_enabled ?? 'true') === 'true';
+    antifraudRequireProxy.value = (data.antifraud_require_proxy ?? 'true') === 'true';
+    antifraudRequireIdentity.value = (data.antifraud_require_identity ?? 'true') === 'true';
+    antifraudMaxAccountsPerProxy.value = data.antifraud_max_accounts_per_proxy ?? '3';
+    antifraudWarmupHours.value = data.antifraud_warmup_hours ?? '24';
+    antifraudWarmupConcurrency.value = data.antifraud_warmup_concurrency ?? '1';
+    antifraudWarmupRpm.value = data.antifraud_warmup_rpm ?? '12';
+    antifraudDefaultAutoTelemetry.value = (data.antifraud_default_auto_telemetry ?? 'true') === 'true';
     loaded.value = true;
   } catch (e) {
     toast((e as Error).message || '加载设置失败');
@@ -378,6 +396,14 @@ async function saveSettings() {
       intercept_warmup_haiku_probe_enabled: interceptWarmupHaikuProbeEnabled.value ? 'true' : 'false',
       intercept_auto_mode_classifier_stage1_mode: interceptAutoModeClassifierStage1Mode.value,
       intercept_auto_mode_classifier_stage2_mode: interceptAutoModeClassifierStage2Mode.value,
+      antifraud_gate_enabled: antifraudGateEnabled.value ? 'true' : 'false',
+      antifraud_require_proxy: antifraudRequireProxy.value ? 'true' : 'false',
+      antifraud_require_identity: antifraudRequireIdentity.value ? 'true' : 'false',
+      antifraud_max_accounts_per_proxy: antifraudMaxAccountsPerProxy.value.trim(),
+      antifraud_warmup_hours: antifraudWarmupHours.value.trim(),
+      antifraud_warmup_concurrency: antifraudWarmupConcurrency.value.trim(),
+      antifraud_warmup_rpm: antifraudWarmupRpm.value.trim(),
+      antifraud_default_auto_telemetry: antifraudDefaultAutoTelemetry.value ? 'true' : 'false',
     });
     toast('保存成功');
   } catch (e) {
@@ -1061,6 +1087,59 @@ onMounted(async () => {
       </div>
     </Card>
 
+    <!-- 防封策略 -->
+    <Card class="bg-white border-[#e8e2d9] rounded-xl overflow-hidden">
+      <div class="p-6 space-y-4">
+        <div>
+          <h3 class="text-sm font-semibold text-[#29261e]">防封策略</h3>
+          <p class="text-xs text-[#8c8475] mt-1">
+            协议指纹对齐之后，仍用代理/身份门禁与新号 warm-up 降低连坐风险。出口伪装版本与准入版本范围无关。
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label class="flex items-center gap-2 h-9 px-3 rounded-md border border-[#e8e2d9] bg-[#f9f6f1] cursor-pointer select-none">
+            <input v-model="antifraudGateEnabled" type="checkbox" class="accent-[#c4704f] w-4 h-4" />
+            <span class="text-sm text-[#29261e]">调度门禁（硬伤账号不参与选号）</span>
+          </label>
+          <label class="flex items-center gap-2 h-9 px-3 rounded-md border border-[#e8e2d9] bg-[#f9f6f1] cursor-pointer select-none">
+            <input v-model="antifraudRequireProxy" type="checkbox" class="accent-[#c4704f] w-4 h-4" />
+            <span class="text-sm text-[#29261e]">要求 proxy_url</span>
+          </label>
+          <label class="flex items-center gap-2 h-9 px-3 rounded-md border border-[#e8e2d9] bg-[#f9f6f1] cursor-pointer select-none">
+            <input v-model="antifraudRequireIdentity" type="checkbox" class="accent-[#c4704f] w-4 h-4" />
+            <span class="text-sm text-[#29261e]">OAuth 要求 uuid/org</span>
+          </label>
+          <label class="flex items-center gap-2 h-9 px-3 rounded-md border border-[#e8e2d9] bg-[#f9f6f1] cursor-pointer select-none">
+            <input v-model="antifraudDefaultAutoTelemetry" type="checkbox" class="accent-[#c4704f] w-4 h-4" />
+            <span class="text-sm text-[#29261e]">新建 OAuth 默认开遥测</span>
+          </label>
+        </div>
+
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div class="space-y-1.5">
+            <Label class="text-[#5c5647] text-xs">同代理账号密度告警</Label>
+            <Input v-model="antifraudMaxAccountsPerProxy" class="border-[#e8e2d9] focus:ring-[#c4704f]" />
+          </div>
+          <div class="space-y-1.5">
+            <Label class="text-[#5c5647] text-xs">Warm-up 小时</Label>
+            <Input v-model="antifraudWarmupHours" class="border-[#e8e2d9] focus:ring-[#c4704f]" />
+          </div>
+          <div class="space-y-1.5">
+            <Label class="text-[#5c5647] text-xs">Warm-up 并发上限</Label>
+            <Input v-model="antifraudWarmupConcurrency" class="border-[#e8e2d9] focus:ring-[#c4704f]" />
+          </div>
+          <div class="space-y-1.5">
+            <Label class="text-[#5c5647] text-xs">Warm-up RPM 上限</Label>
+            <Input v-model="antifraudWarmupRpm" class="border-[#e8e2d9] focus:ring-[#c4704f]" />
+          </div>
+        </div>
+        <p class="text-[11px] text-[#b5b0a6]">
+          账号卡片会显示「门禁拦截 / 有风险 / Warm-up / 健康」。可点「出口」探测代理出口 IP。
+        </p>
+      </div>
+    </Card>
+
     <!-- 客户端访问策略 -->
     <Card class="bg-white border-[#e8e2d9] rounded-xl overflow-hidden">
       <div class="p-6 space-y-4">
@@ -1077,18 +1156,18 @@ onMounted(async () => {
             <Textarea
               v-model="allowedClaudeCodeVersions"
               rows="4"
-              placeholder="2.1.89-2.1.173"
+              placeholder="2.1.89-2.1.999"
               class="border-[#e8e2d9] focus:ring-[#c4704f] font-mono text-sm"
               :class="isValidClaudeCodeVersions ? '' : 'border-red-400'"
             />
-            <p class="text-[11px] text-[#b5b0a6]">支持精确版本、2.1.*、2.1.89-2.1.173；逗号或换行分隔</p>
+            <p class="text-[11px] text-[#b5b0a6]">支持精确版本、2.1.*、2.1.89-2.1.999；逗号或换行分隔</p>
             <div class="flex flex-wrap gap-1.5">
               <span class="text-xs text-[#b5b0a6] self-center">预设:</span>
               <button
                 type="button"
-                @click="allowedClaudeCodeVersions = '2.1.89-2.1.173'"
+                @click="allowedClaudeCodeVersions = '2.1.89-2.1.999'"
                 class="px-2 py-0.5 text-xs rounded border border-[#e8e2d9] bg-[#f9f6f1] text-[#8c8475] hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-600 transition-colors"
-              >2.1.89-2.1.173</button>
+              >2.1.89-2.1.999</button>
               <button
                 type="button"
                 @click="allowedClaudeCodeVersions = ''"

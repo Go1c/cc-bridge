@@ -1,8 +1,13 @@
 use sqlx::AnyPool;
 use std::path::Path;
 
-const PREVIOUS_ALLOWED_CLAUDE_CODE_VERSIONS_SETTINGS: &[&str] =
-    &["2.1.89-2.1.156", "2.1.89-2.1.169", "2.1.89-2.1.172"];
+const PREVIOUS_ALLOWED_CLAUDE_CODE_VERSIONS_SETTINGS: &[&str] = &[
+    "2.1.89-2.1.156",
+    "2.1.89-2.1.169",
+    "2.1.89-2.1.172",
+    "2.1.89-2.1.173",
+    "2.1.89-2.1.211",
+];
 const OBSOLETE_SETTINGS_KEYS: &[&str] = &[
     "intercept_warmup_non_stream_aux_enabled",
     "intercept_warmup_non_stream_aux_mode",
@@ -213,6 +218,43 @@ pub async fn migrate(pool: &AnyPool, driver: &str) -> Result<(), sqlx::Error> {
         (
             "intercept_auto_mode_classifier_stage2_mode",
             crate::store::settings_store::DEFAULT_INTERCEPT_AUTO_MODE_CLASSIFIER_STAGE2_MODE,
+        ),
+        // 防封策略默认值：门禁 + 代理/身份要求 + 新号 warm-up。
+        (
+            "antifraud_gate_enabled",
+            crate::store::settings_store::DEFAULT_ANTIFRAUD_GATE_ENABLED,
+        ),
+        (
+            "antifraud_require_proxy",
+            crate::store::settings_store::DEFAULT_ANTIFRAUD_REQUIRE_PROXY,
+        ),
+        (
+            "antifraud_require_identity",
+            crate::store::settings_store::DEFAULT_ANTIFRAUD_REQUIRE_IDENTITY,
+        ),
+        (
+            "antifraud_max_accounts_per_proxy",
+            crate::store::settings_store::DEFAULT_ANTIFRAUD_MAX_ACCOUNTS_PER_PROXY,
+        ),
+        (
+            "antifraud_warmup_hours",
+            crate::store::settings_store::DEFAULT_ANTIFRAUD_WARMUP_HOURS,
+        ),
+        (
+            "antifraud_warmup_concurrency",
+            crate::store::settings_store::DEFAULT_ANTIFRAUD_WARMUP_CONCURRENCY,
+        ),
+        (
+            "antifraud_warmup_rpm",
+            crate::store::settings_store::DEFAULT_ANTIFRAUD_WARMUP_RPM,
+        ),
+        (
+            "antifraud_default_auto_telemetry",
+            crate::store::settings_store::DEFAULT_ANTIFRAUD_DEFAULT_AUTO_TELEMETRY,
+        ),
+        (
+            "antifraud_proxy_probe_ttl_secs",
+            crate::store::settings_store::DEFAULT_ANTIFRAUD_PROXY_PROBE_TTL_SECS,
         ),
         // thinking.type=disabled 兼容改写默认关闭,管理员确认模型后再开启。
         (

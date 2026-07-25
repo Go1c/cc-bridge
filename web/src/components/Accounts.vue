@@ -76,6 +76,8 @@ const testing = ref<number | null>(null);
 const testResult = ref<{ status: string; message?: string } | null>(null);
 /** 正在刷新用量的账号 ID */
 const refreshingUsage = ref<number | null>(null);
+/** 正在做代理出口探测的账号 ID */
+const probingProxy = ref<number | null>(null);
 
 /** 加载账号列表 */
 async function load() {
@@ -318,6 +320,58 @@ async function refreshUsage(id: number) {
 }
 
 /**
+ * 探测账号代理出口 IP，并刷新防封 findings。
+ * @param id 账号 ID
+ */
+async function probeProxy(id: number) {
+  probingProxy.value = id;
+  try {
+    const report = await api.probeAccountProxy(id);
+    const acc = accounts.value.find(a => a.id === id);
+    if (acc) {
+      acc.antifraud = {
+        ok: report.antifraud_ok,
+        hard_block: report.hard_block,
+        warmup_active: report.warmup_active,
+        effective_concurrency: report.effective_concurrency,
+        effective_rpm_limit: report.effective_rpm_limit,
+        findings: report.findings,
+        proxy_cohort_size: report.proxy_cohort_size,
+      };
+    }
+    if (report.proxy_probe?.ok) {
+      toast(`出口 IP: ${report.proxy_probe.exit_ip} (${report.proxy_probe.latency_ms}ms)`);
+    } else {
+      toast(report.proxy_probe?.error || '代理探测失败');
+    }
+  } catch (e: unknown) {
+    toast((e as Error).message || '代理探测失败');
+  }
+  probingProxy.value = null;
+}
+
+/** 防封状态徽章样式 */
+function antifraudStyle(a: Account): { class: string; label: string } {
+  const af = a.antifraud;
+  if (!af) return { class: 'bg-[#f5f0e9] text-[#8c8475] border-[#e8e2d9]', label: '未检' };
+  if (af.hard_block) return { class: 'bg-red-50 text-red-600 border-red-200', label: '门禁拦截' };
+  if (!af.ok) return { class: 'bg-amber-50 text-amber-700 border-amber-200', label: '有风险' };
+  if (af.warmup_active) return { class: 'bg-sky-50 text-sky-700 border-sky-200', label: 'Warm-up' };
+  return { class: 'bg-emerald-50 text-emerald-700 border-emerald-200', label: '健康' };
+}
+
+/** 防封 findings 摘要文本 */
+function antifraudSummary(a: Account): string {
+  const af = a.antifraud;
+  if (!af?.findings?.length) return '';
+  return af.findings
+    .filter(f => f.severity !== 'info')
+    .slice(0, 3)
+    .map(f => f.message)
+    .join('；');
+}
+
+/**
  * 切换账号调度状态（启用/停用）
  * @param a 账号对象
  */
@@ -418,9 +472,11 @@ function authTypeLabel(authType: string): string {
  * @param account 账号对象
  */
 function rpmLabel(account: Account): string {
-  if (!account.rpm_limit || account.rpm_limit <= 0) return '未限制';
+  const limit = account.rpm_limit_effective ?? account.rpm_limit ?? 0;
+  if (!limit || limit <= 0) return '未限制';
   const current = account.rpm_current ?? 0;
-  return account.rpm_saturated ? `已满 ${current}/${account.rpm_limit}` : `${current}/${account.rpm_limit}`;
+  const warm = account.antifraud?.warmup_active ? ' (warm)' : '';
+  return account.rpm_saturated ? `已满 ${current}/${limit}${warm}` : `${current}/${limit}${warm}`;
 }
 
 /**
@@ -665,10 +721,18 @@ async function copyText(text: string) {
                 <p v-if="a.name" class="text-xs text-[#8c8475] truncate">{{ a.email }}</p>
               </div>
             </div>
-            <Badge :class="statusStyle(a).class" class="border text-xs font-medium flex-shrink-0">
-              {{ statusStyle(a).label }}
-            </Badge>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              <Badge :class="antifraudStyle(a).class" class="border text-[10px] font-medium" :title="antifraudSummary(a)">
+                {{ antifraudStyle(a).label }}
+              </Badge>
+              <Badge :class="statusStyle(a).class" class="border text-xs font-medium">
+                {{ statusStyle(a).label }}
+              </Badge>
+            </div>
           </div>
+          <p v-if="antifraudSummary(a)" class="text-[11px] text-amber-700/90 leading-snug line-clamp-2" :title="antifraudSummary(a)">
+            {{ antifraudSummary(a) }}
+          </p>
 
           <!-- 信息 -->
           <div class="pt-2 border-t border-[#f0ebe4] space-y-2">
@@ -683,8 +747,8 @@ async function copyText(text: string) {
               </div>
               <div class="text-center">
                 <p class="text-[10px] text-[#b5b0a6] uppercase tracking-wider">并发</p>
-                <p class="text-sm font-medium" :class="(a.current_concurrency ?? 0) >= a.concurrency ? 'text-red-500' : 'text-[#29261e]'">
-                  {{ a.current_concurrency ?? 0 }}/{{ a.concurrency }}
+                <p class="text-sm font-medium" :class="(a.current_concurrency ?? 0) >= (a.antifraud?.effective_concurrency ?? a.concurrency) ? 'text-red-500' : 'text-[#29261e]'">
+                  {{ a.current_concurrency ?? 0 }}/{{ a.antifraud?.effective_concurrency ?? a.concurrency }}<span v-if="a.antifraud?.warmup_active" class="text-[10px] text-sky-600">w</span>
                 </p>
               </div>
               <div class="text-center">
@@ -721,7 +785,10 @@ async function copyText(text: string) {
             <div class="space-y-3">
               <div>
                 <p class="text-[10px] text-[#b5b0a6] uppercase tracking-wider mb-0.5">代理</p>
-                <p class="text-sm text-[#8c8475] truncate">{{ a.proxy_url || '直连' }}</p>
+                <p class="text-sm text-[#8c8475] truncate">
+                  {{ a.proxy_url || '直连' }}
+                  <span v-if="(a.antifraud?.proxy_cohort_size ?? 0) > 1" class="text-amber-600 text-xs">· 共 {{ a.antifraud?.proxy_cohort_size }} 号</span>
+                </p>
               </div>
               <div>
                 <p class="text-[10px] text-[#b5b0a6] uppercase tracking-wider mb-0.5">认证方式</p>
@@ -892,6 +959,16 @@ async function copyText(text: string) {
               class="text-[#c4704f] hover:text-[#b5623f] hover:bg-[#c4704f]/5 h-8 px-3 text-xs flex-1"
             >
               {{ testing === a.id ? '测试中...' : '测试' }}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              @click="probeProxy(a.id)"
+              :disabled="probingProxy === a.id || !a.proxy_url"
+              class="text-[#c4704f] hover:text-[#b5623f] hover:bg-[#c4704f]/5 h-8 px-3 text-xs flex-1"
+              title="探测代理出口 IP"
+            >
+              {{ probingProxy === a.id ? '探测中...' : '出口' }}
             </Button>
             <Button
               variant="ghost"

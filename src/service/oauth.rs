@@ -54,7 +54,8 @@ impl TokenTester {
             serde_json::from_value(canonical_env.clone()).unwrap_or_default();
         let version = normalize_version(&env.version);
         let stainless_os = match env.platform.as_str() {
-            "darwin" => "Mac OS X",
+            // 对齐 2.1.211 真实抓包：X-Stainless-OS=MacOS
+            "darwin" => "MacOS",
             "win32" => "Windows",
             _ => "Linux",
         };

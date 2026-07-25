@@ -22,80 +22,80 @@ fn profile_presets() -> Vec<EnvPreset> {
         // --- darwin arm64 (8 presets) ---
         dprof(
             "arm64",
-            "v22.15.0",
+            "v26.3.0",
             "iTerm.app",
             "zsh",
-            "Darwin 24.4.0",
+            "Darwin 25.5.0",
             "/Users/user/projects",
             "npm,pnpm",
         ),
         dprof(
             "arm64",
-            "v24.3.0",
+            "v26.3.0",
             "Apple_Terminal",
             "zsh",
-            "Darwin 24.5.0",
+            "Darwin 25.5.0",
             "/Users/user/code",
             "npm,yarn",
         ),
         dprof(
             "arm64",
-            "v22.15.0",
+            "v26.3.0",
             "vscode",
             "zsh",
-            "Darwin 24.4.0",
+            "Darwin 25.5.0",
             "/Users/user/workspace",
             "npm,pnpm",
         ),
         dprof(
             "arm64",
-            "v24.3.0",
+            "v26.3.0",
             "WarpTerminal",
             "zsh",
-            "Darwin 24.5.0",
+            "Darwin 25.5.0",
             "/Users/user/dev",
             "npm",
         ),
         dprof(
             "arm64",
-            "v22.15.0",
+            "v26.3.0",
             "kitty",
             "zsh",
-            "Darwin 24.4.0",
+            "Darwin 25.5.0",
             "/Users/user/src",
             "npm,yarn,pnpm",
         ),
         dprof(
             "arm64",
-            "v24.3.0",
+            "v26.3.0",
             "iTerm.app",
             "zsh",
-            "Darwin 24.5.0",
+            "Darwin 25.5.0",
             "/Users/user/projects",
             "npm",
         ),
         dprof(
             "arm64",
-            "v22.15.0",
+            "v26.3.0",
             "tmux",
             "zsh",
-            "Darwin 24.4.0",
+            "Darwin 25.5.0",
             "/Users/user/repo",
             "npm,pnpm",
         ),
         dprof(
             "arm64",
-            "v24.3.0",
+            "v26.3.0",
             "ghostty",
             "zsh",
-            "Darwin 24.5.0",
+            "Darwin 25.5.0",
             "/Users/user/work",
             "npm,yarn",
         ),
         // --- darwin x64 (4 presets) ---
         dprof(
             "x64",
-            "v22.15.0",
+            "v26.3.0",
             "iTerm.app",
             "zsh",
             "Darwin 23.6.0",
@@ -104,7 +104,7 @@ fn profile_presets() -> Vec<EnvPreset> {
         ),
         dprof(
             "x64",
-            "v24.3.0",
+            "v26.3.0",
             "Apple_Terminal",
             "zsh",
             "Darwin 23.6.0",
@@ -113,7 +113,7 @@ fn profile_presets() -> Vec<EnvPreset> {
         ),
         dprof(
             "x64",
-            "v22.15.0",
+            "v26.3.0",
             "vscode",
             "zsh",
             "Darwin 23.6.0",
@@ -122,7 +122,7 @@ fn profile_presets() -> Vec<EnvPreset> {
         ),
         dprof(
             "x64",
-            "v24.3.0",
+            "v26.3.0",
             "iTerm.app",
             "zsh",
             "Darwin 23.6.0",
@@ -131,7 +131,7 @@ fn profile_presets() -> Vec<EnvPreset> {
         ),
         // --- linux (6 presets) ---
         lprof(
-            "v22.15.0",
+            "v26.3.0",
             "gnome-terminal",
             "bash",
             "Linux 6.8.0-60-generic",
@@ -142,7 +142,7 @@ fn profile_presets() -> Vec<EnvPreset> {
             "6.8.0-60-generic",
         ),
         lprof(
-            "v24.3.0",
+            "v26.3.0",
             "ssh-session",
             "bash",
             "Linux 6.5.0-1025-aws",
@@ -153,7 +153,7 @@ fn profile_presets() -> Vec<EnvPreset> {
             "6.5.0-1025-aws",
         ),
         lprof(
-            "v22.15.0",
+            "v26.3.0",
             "xterm-256color",
             "zsh",
             "Linux 6.6.32",
@@ -164,7 +164,7 @@ fn profile_presets() -> Vec<EnvPreset> {
             "6.6.32",
         ),
         lprof(
-            "v24.3.0",
+            "v26.3.0",
             "vscode",
             "bash",
             "Linux 6.8.0-60-generic",
@@ -175,7 +175,7 @@ fn profile_presets() -> Vec<EnvPreset> {
             "6.8.0-60-generic",
         ),
         lprof(
-            "v22.15.0",
+            "v26.3.0",
             "tmux",
             "bash",
             "Linux 6.1.0-21-amd64",
@@ -186,7 +186,7 @@ fn profile_presets() -> Vec<EnvPreset> {
             "6.1.0-21-amd64",
         ),
         lprof(
-            "v24.3.0",
+            "v26.3.0",
             "alacritty",
             "zsh",
             "Linux 6.9.3-arch1-1",
@@ -198,28 +198,28 @@ fn profile_presets() -> Vec<EnvPreset> {
         ),
         // --- win32 (4 presets) ---
         wprof(
-            "v22.15.0",
+            "v26.3.0",
             "windows-terminal",
             "Windows 10 Pro 10.0.19045",
             "/c/Users/user/projects",
             "npm,pnpm",
         ),
         wprof(
-            "v24.3.0",
+            "v26.3.0",
             "vscode",
             "Windows 11 Pro 10.0.22631",
             "/c/Users/user/workspace",
             "npm,yarn",
         ),
         wprof(
-            "v22.15.0",
+            "v26.3.0",
             "mingw64",
             "Windows 10 Pro 10.0.19045",
             "/c/Users/user/src",
             "npm",
         ),
         wprof(
-            "v24.3.0",
+            "v26.3.0",
             "windows-terminal",
             "Windows 11 Pro 10.0.22631",
             "/c/Users/user/dev",
@@ -403,7 +403,8 @@ pub fn build_full_env_json(env: &CanonicalEnvData) -> Value {
         "terminal": env.terminal,
         "package_managers": env.package_managers,
         "runtimes": env.runtimes,
-        "is_running_with_bun": false,
+        // 2.1.211 本机二进制由 Bun 编译；Stainless 仍报 node/v26.3.0，但 env 画像里该标志为 true。
+        "is_running_with_bun": true,
         "is_ci": false,
         "is_claubbit": false,
         "is_claude_code_remote": false,
@@ -631,7 +632,7 @@ pub fn normalize_env(mut env: CanonicalEnvData) -> CanonicalEnvData {
         };
     }
     if env.node_version.is_empty() {
-        env.node_version = "v24.3.0".into();
+        env.node_version = "v26.3.0".into();
     }
     if env.terminal.is_empty() {
         env.terminal = match env.platform.as_str() {
@@ -693,7 +694,7 @@ pub fn normalize_prompt(
     }
     if prompt.os_version.is_empty() {
         prompt.os_version = match env.platform.as_str() {
-            "darwin" => "Darwin 24.4.0".into(),
+            "darwin" => "Darwin 25.5.0".into(),
             "win32" => "Windows 11 Pro 10.0.22631".into(),
             _ => format!("Linux {}", env.linux_kernel),
         };
@@ -900,7 +901,7 @@ mod tests {
     fn legacy_env_and_process_are_normalized_without_storage_writeback() {
         let env = normalize_env(CanonicalEnvData::default());
         assert_eq!(env.platform, "linux");
-        assert_eq!(env.node_version, "v24.3.0");
+        assert_eq!(env.node_version, "v26.3.0");
         assert_eq!(env.version, DEFAULT_CLAUDE_CODE_VERSION);
         assert_eq!(env.linux_distro_id, "ubuntu");
         assert_eq!(env.linux_kernel, "6.8.0-60-generic");

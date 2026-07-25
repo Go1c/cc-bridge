@@ -1004,7 +1004,7 @@ mod tests {
             platform: "linux".into(),
             platform_raw: "linux".into(),
             arch: "x64".into(),
-            node_version: "v24.3.0".into(),
+            node_version: "v26.3.0".into(),
             terminal: "ssh-session".into(),
             package_managers: "npm".into(),
             runtimes: "node".into(),
@@ -1095,7 +1095,7 @@ mod tests {
         let eval_headers = super::telemetry_request_headers(
             "/api/eval/sdk-zAZezfDKGoZuXXKe",
             "redacted",
-            "Bun/1.3.14",
+            "Bun/1.4.0",
             false,
         );
         assert_eq!(eval_headers.get("Accept").unwrap(), "*/*");

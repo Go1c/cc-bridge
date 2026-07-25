@@ -1195,6 +1195,7 @@ impl GatewayService {
             match self
                 .account_svc
                 .acquire_account_rpm(&account, sticky_account, &session_hash)
+                // RPM 已含 warm-up 有效上限
                 .await
             {
                 Ok(()) => {}
@@ -1206,10 +1207,12 @@ impl GatewayService {
             }
 
             // 获取并发槽位：走账号级 FIFO 排队器（tokio Semaphore 按调用顺序授予 permit）
+            // warm-up 期间使用有效并发上限，避免新号一上来打满。
             let t_slot = std::time::Instant::now();
+            let eff_conc = self.account_svc.effective_concurrency(&account).await;
             let queue = self
                 .account_svc
-                .get_or_create_queue(account.id, account.concurrency)
+                .get_or_create_queue(account.id, eff_conc)
                 .await;
             let slot_permit = match queue.acquire(SLOT_WAIT_TIMEOUT).await {
                 Ok(p) => p,

@@ -65,6 +65,17 @@ pub const DEFAULT_BOOTSTRAP_MODEL_OPTIONS_MODE: &str = "passthrough";
 /// bootstrap 自定义模型选项默认保留当前抓包中出现的 Fable 入口。
 pub const DEFAULT_BOOTSTRAP_ADDITIONAL_MODEL_OPTIONS: &str = r#"[{"model":"claude-fable-5[1m]","name":"Fable","description":"Most capable for your hardest and longest-running tasks","disabled_reason":null}]"#;
 
+// --- 防封策略默认值 ---
+pub const DEFAULT_ANTIFRAUD_GATE_ENABLED: &str = "true";
+pub const DEFAULT_ANTIFRAUD_REQUIRE_PROXY: &str = "true";
+pub const DEFAULT_ANTIFRAUD_REQUIRE_IDENTITY: &str = "true";
+pub const DEFAULT_ANTIFRAUD_MAX_ACCOUNTS_PER_PROXY: &str = "3";
+pub const DEFAULT_ANTIFRAUD_WARMUP_HOURS: &str = "24";
+pub const DEFAULT_ANTIFRAUD_WARMUP_CONCURRENCY: &str = "1";
+pub const DEFAULT_ANTIFRAUD_WARMUP_RPM: &str = "12";
+pub const DEFAULT_ANTIFRAUD_DEFAULT_AUTO_TELEMETRY: &str = "true";
+pub const DEFAULT_ANTIFRAUD_PROXY_PROBE_TTL_SECS: &str = "600";
+
 /// 全局设置存储，key-value 结构。
 pub struct SettingsStore {
     pool: AnyPool,
