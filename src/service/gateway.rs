@@ -5038,7 +5038,9 @@ mod tests {
     fn assistant_prefill_config(enabled: bool) -> AssistantPrefillInterceptConfig {
         AssistantPrefillInterceptConfig {
             enabled,
-            models: parse_system_role_model_list("claude-fable-5,claude-opus-4-8,claude-opus-4-7"),
+            models: parse_system_role_model_list(
+                "claude-fable-5,claude-opus-5,claude-sonnet-5,claude-opus-4-8,claude-opus-4-7",
+            ),
         }
     }
 
@@ -5096,7 +5098,7 @@ mod tests {
             disable_reason: String::new(),
             auto_telemetry: false,
             auto_poll_usage: false,
-            allow_1m_models: "opus".into(),
+            allow_1m_models: "opus,fable".into(),
             telemetry_count: 0,
             usage_data: json!({}),
             usage_fetched_at: None,
@@ -5277,7 +5279,7 @@ mod tests {
     #[test]
     fn count_tokens_beta_filters_context_1m_when_model_not_allowed() {
         let mut account = test_account();
-        account.allow_1m_models = "opus".into();
+        account.allow_1m_models = "opus,fable".into();
         let mut headers = HashMap::new();
         let mut original = HashMap::new();
         original.insert(

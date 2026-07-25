@@ -8,6 +8,11 @@ const PREVIOUS_ALLOWED_CLAUDE_CODE_VERSIONS_SETTINGS: &[&str] = &[
     "2.1.89-2.1.173",
     "2.1.89-2.1.211",
 ];
+/// 仅当库里仍是旧默认白名单时，才升级到包含 Claude 5 系列的新默认值。
+const PREVIOUS_ALLOW_SYSTEM_ROLE_MODELS_SETTINGS: &[&str] = &["claude-opus-4-8"];
+/// 仅当库里仍是旧默认 prefill 拦截列表时，才追加 Claude 5 系列模型。
+const PREVIOUS_INTERCEPT_ASSISTANT_PREFILL_MODELS_SETTINGS: &[&str] =
+    &["claude-fable-5,claude-opus-4-8,claude-opus-4-7"];
 const OBSOLETE_SETTINGS_KEYS: &[&str] = &[
     "intercept_warmup_non_stream_aux_enabled",
     "intercept_warmup_non_stream_aux_mode",
@@ -112,10 +117,12 @@ pub async fn migrate(pool: &AnyPool, driver: &str) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await
         .ok();
-    sqlx::query("ALTER TABLE accounts ADD COLUMN allow_1m_models TEXT NOT NULL DEFAULT 'opus'")
-        .execute(pool)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE accounts ADD COLUMN allow_1m_models TEXT NOT NULL DEFAULT 'opus,fable'",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("ALTER TABLE accounts ADD COLUMN rpm_limit INTEGER NOT NULL DEFAULT 0")
         .execute(pool)
         .await
@@ -157,7 +164,7 @@ pub async fn migrate(pool: &AnyPool, driver: &str) -> Result<(), sqlx::Error> {
         ("peak_prime_enabled", "true"),
         ("peak_prime_hours", "4,5,6"),
         ("peak_prime_model", "claude-haiku-4-5-20251001"),
-        // Claude Code Opus 4.8 会在 messages 中携带 role=system。
+        // Claude Code 新模型（Opus 5 / Sonnet 5 / Opus 4.8）会在 messages 中携带 role=system。
         (
             "allow_system_role_models",
             crate::store::settings_store::DEFAULT_ALLOW_SYSTEM_ROLE_MODELS,
@@ -356,6 +363,28 @@ async fn upgrade_default_settings(pool: &AnyPool) -> Result<(), sqlx::Error> {
             .execute(pool)
             .await?;
     }
+    for previous in PREVIOUS_ALLOW_SYSTEM_ROLE_MODELS_SETTINGS {
+        sqlx::query("UPDATE settings SET value=$1 WHERE key=$2 AND value=$3")
+            .bind(crate::store::settings_store::DEFAULT_ALLOW_SYSTEM_ROLE_MODELS)
+            .bind("allow_system_role_models")
+            .bind(previous)
+            .execute(pool)
+            .await?;
+    }
+    for previous in PREVIOUS_INTERCEPT_ASSISTANT_PREFILL_MODELS_SETTINGS {
+        sqlx::query("UPDATE settings SET value=$1 WHERE key=$2 AND value=$3")
+            .bind(crate::store::settings_store::DEFAULT_INTERCEPT_ASSISTANT_PREFILL_MODELS)
+            .bind("intercept_assistant_prefill_models")
+            .bind(previous)
+            .execute(pool)
+            .await?;
+    }
+    // 仅当账号仍是旧默认 "opus" 时，升级为包含 Fable 的新默认；自定义配置不动。
+    sqlx::query("UPDATE accounts SET allow_1m_models=$1 WHERE allow_1m_models=$2")
+        .bind(crate::model::account::default_allow_1m_models())
+        .bind("opus")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -645,6 +674,119 @@ mod tests {
                 .expect("count obsolete setting");
             assert_eq!(count, 0, "{} should be removed", key);
         }
+    }
+
+    #[tokio::test]
+    async fn migrate_upgrades_only_old_default_model_settings() {
+        let pool = make_sqlite_pool().await;
+        migrate(&pool, "sqlite").await.expect("initial migrate");
+
+        for previous in PREVIOUS_ALLOW_SYSTEM_ROLE_MODELS_SETTINGS {
+            sqlx::query("UPDATE settings SET value=$1 WHERE key=$2")
+                .bind(previous)
+                .bind("allow_system_role_models")
+                .execute(&pool)
+                .await
+                .expect("set old system role default");
+            migrate(&pool, "sqlite").await.expect("upgrade system role");
+            let upgraded: String = sqlx::query_scalar("SELECT value FROM settings WHERE key=$1")
+                .bind("allow_system_role_models")
+                .fetch_one(&pool)
+                .await
+                .expect("upgraded system role");
+            assert_eq!(
+                upgraded,
+                crate::store::settings_store::DEFAULT_ALLOW_SYSTEM_ROLE_MODELS
+            );
+        }
+
+        for previous in PREVIOUS_INTERCEPT_ASSISTANT_PREFILL_MODELS_SETTINGS {
+            sqlx::query("UPDATE settings SET value=$1 WHERE key=$2")
+                .bind(previous)
+                .bind("intercept_assistant_prefill_models")
+                .execute(&pool)
+                .await
+                .expect("set old prefill default");
+            migrate(&pool, "sqlite").await.expect("upgrade prefill");
+            let upgraded: String = sqlx::query_scalar("SELECT value FROM settings WHERE key=$1")
+                .bind("intercept_assistant_prefill_models")
+                .fetch_one(&pool)
+                .await
+                .expect("upgraded prefill");
+            assert_eq!(
+                upgraded,
+                crate::store::settings_store::DEFAULT_INTERCEPT_ASSISTANT_PREFILL_MODELS
+            );
+        }
+
+        sqlx::query("UPDATE settings SET value=$1 WHERE key=$2")
+            .bind("claude-custom-model")
+            .bind("allow_system_role_models")
+            .execute(&pool)
+            .await
+            .expect("set custom system role");
+        migrate(&pool, "sqlite").await.expect("keep custom system role");
+        let custom: String = sqlx::query_scalar("SELECT value FROM settings WHERE key=$1")
+            .bind("allow_system_role_models")
+            .fetch_one(&pool)
+            .await
+            .expect("custom system role");
+        assert_eq!(custom, "claude-custom-model");
+    }
+
+    #[tokio::test]
+    async fn migrate_upgrades_old_default_allow_1m_models() {
+        let pool = make_sqlite_pool().await;
+        migrate(&pool, "sqlite").await.expect("initial migrate");
+
+        sqlx::query(
+            r#"
+            INSERT INTO accounts (
+                name, email, status, token, auth_type, device_id, allow_1m_models
+            ) VALUES ($1, $2, 'active', 'tok', 'setup_token', 'dev', $3)
+            "#,
+        )
+        .bind("old-default")
+        .bind("old@example.com")
+        .bind("opus")
+        .execute(&pool)
+        .await
+        .expect("insert old default account");
+
+        sqlx::query(
+            r#"
+            INSERT INTO accounts (
+                name, email, status, token, auth_type, device_id, allow_1m_models
+            ) VALUES ($1, $2, 'active', 'tok', 'setup_token', 'dev2', $3)
+            "#,
+        )
+        .bind("custom")
+        .bind("custom@example.com")
+        .bind("opus,sonnet")
+        .execute(&pool)
+        .await
+        .expect("insert custom account");
+
+        migrate(&pool, "sqlite").await.expect("upgrade migrate");
+
+        let upgraded: String =
+            sqlx::query_scalar("SELECT allow_1m_models FROM accounts WHERE email=$1")
+                .bind("old@example.com")
+                .fetch_one(&pool)
+                .await
+                .expect("upgraded account");
+        assert_eq!(
+            upgraded,
+            crate::model::account::default_allow_1m_models()
+        );
+
+        let custom: String =
+            sqlx::query_scalar("SELECT allow_1m_models FROM accounts WHERE email=$1")
+                .bind("custom@example.com")
+                .fetch_one(&pool)
+                .await
+                .expect("custom account");
+        assert_eq!(custom, "opus,sonnet");
     }
 }
 

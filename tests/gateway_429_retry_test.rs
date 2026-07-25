@@ -59,7 +59,7 @@ async fn create_test_account(svc: &AccountService, email: &str, priority: i32) -
         disable_reason: String::new(),
         auto_telemetry: false,
         auto_poll_usage: false,
-        allow_1m_models: "opus".into(),
+        allow_1m_models: "opus,fable".into(),
         telemetry_count: 0,
         usage_data: serde_json::json!({}),
         usage_fetched_at: None,

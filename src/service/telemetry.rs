@@ -1045,7 +1045,7 @@ mod tests {
             disable_reason: String::new(),
             auto_telemetry: true,
             auto_poll_usage: false,
-            allow_1m_models: "opus".into(),
+            allow_1m_models: "opus,fable".into(),
             telemetry_count: 0,
             usage_data: json!({}),
             usage_fetched_at: None,

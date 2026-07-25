@@ -122,9 +122,9 @@ impl AccountStore {
                 .unwrap_or_default(),
             auto_telemetry: row.try_get::<i32, _>("auto_telemetry").unwrap_or(0) != 0,
             auto_poll_usage: row.try_get::<i32, _>("auto_poll_usage").unwrap_or(0) != 0,
-            allow_1m_models: row
-                .try_get::<String, _>("allow_1m_models")
-                .unwrap_or_else(|_| "opus".into()),
+            allow_1m_models: row.try_get::<String, _>("allow_1m_models").unwrap_or_else(
+                |_| crate::model::account::default_allow_1m_models(),
+            ),
             telemetry_count: row.try_get::<i64, _>("telemetry_count").unwrap_or(0),
             usage_data: Self::parse_json(row, "usage_data"),
             usage_fetched_at: Self::parse_optional_time(row, "usage_fetched_at"),

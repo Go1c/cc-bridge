@@ -91,7 +91,7 @@ const API_MAX_TOKENS_LIMIT: u64 = 64000;
 const API_DEFAULT_MAX_TOKENS: u64 = 32000;
 const CONTEXT_1M_BETA_TOKEN: &str = "context-1m-2025-08-07";
 const FABLE_MODEL_ID: &str = "claude-fable-5";
-const FABLE_FALLBACK_MODEL_ID: &str = "claude-opus-4-8";
+const FABLE_FALLBACK_MODEL_ID: &str = "claude-opus-5";
 
 /// 从逗号分隔的 anthropic-beta header 中剥离指定 token，保留其它 token 和相对顺序。
 ///
@@ -780,7 +780,7 @@ impl Rewriter {
             // 合并客户端 beta 与必需 beta；对于不在账号 1M 白名单内的模型，
             // 强制剥掉 context-1m-2025-08-07（即便客户端传了）。
             // 对应 sub2api BetaPolicy(action=filter, model_whitelist=..., fallback=filter)：
-            // 默认放行 "opus" 家族，运维可在账号设置里改 allow_1m_models 字段。
+            // 默认放行 "opus,fable"（Opus 家族 + Fable 5），运维可在账号设置里改 allow_1m_models。
             let existing_beta = out.get("anthropic-beta").cloned().unwrap_or_default();
             let filtered_existing = if matches_1m_whitelist(model_id, &account.allow_1m_models) {
                 existing_beta
@@ -4367,11 +4367,19 @@ fn api_default_max_tokens(body: &serde_json::Value) -> u64 {
         .unwrap_or_default()
         .to_lowercase();
 
-    if model == "claude-opus-4-8" || is_fable_model(&model) {
+    if uses_high_default_max_tokens(&model) {
         API_MAX_TOKENS_LIMIT
     } else {
         API_DEFAULT_MAX_TOKENS
     }
+}
+
+/// 高上限模型：Opus 5 / Sonnet 5 / Opus 4.8 / Fable 默认给满 API 上限。
+fn uses_high_default_max_tokens(model: &str) -> bool {
+    matches!(
+        model,
+        "claude-opus-5" | "claude-sonnet-5" | "claude-opus-4-8"
+    ) || is_fable_model(model)
 }
 
 /// 为 Fable 主请求补齐当前 Claude Code 抓包中的服务端 fallback 列表。
@@ -4890,7 +4898,7 @@ mod tests {
             disable_reason: String::new(),
             auto_telemetry: false,
             auto_poll_usage: false,
-            allow_1m_models: "opus".into(),
+            allow_1m_models: crate::model::account::default_allow_1m_models(),
             telemetry_count: 0,
             usage_data: json!({}),
             usage_fetched_at: None,
@@ -7775,6 +7783,20 @@ mod tests {
     }
 
     #[test]
+    fn api_messages_defaults_opus5_and_sonnet5_max_tokens_to_high_limit() {
+        for model in ["claude-opus-5", "claude-sonnet-5"] {
+            let parsed = rewrite_messages_body(
+                json!({
+                    "model": model,
+                    "messages": []
+                }),
+                ClientType::API,
+            );
+            assert_eq!(parsed["max_tokens"], json!(64000), "model={model}");
+        }
+    }
+
+    #[test]
     fn api_messages_defaults_fable_to_capture_max_tokens_and_fallbacks() {
         let parsed = rewrite_messages_body(
             json!({
@@ -7785,7 +7807,7 @@ mod tests {
         );
 
         assert_eq!(parsed["max_tokens"], json!(64000));
-        assert_eq!(parsed["fallbacks"], json!([{ "model": "claude-opus-4-8" }]));
+        assert_eq!(parsed["fallbacks"], json!([{ "model": "claude-opus-5" }]));
     }
 
     #[test]
@@ -7929,6 +7951,7 @@ mod tests {
 
     #[test]
     fn fable_messages_headers_use_fallback_beta_without_context_1m() {
+        // 默认白名单已含 fable，但客户端未传 context-1m 时仍不主动注入。
         let account = test_account();
         let rewriter = Rewriter::new();
         let headers = rewriter.rewrite_headers(
@@ -7950,8 +7973,8 @@ mod tests {
 
     #[test]
     fn fable_context_1m_beta_keeps_claude_code_order_when_allowed() {
-        let mut account = test_account();
-        account.allow_1m_models = "fable".into();
+        // 默认 allow_1m_models=opus,fable 时，Fable 请求可透传 context-1m。
+        let account = test_account();
         let rewriter = Rewriter::new();
         let mut incoming = std::collections::HashMap::new();
         incoming.insert("anthropic-beta".to_string(), CTX_1M.to_string());
@@ -7974,8 +7997,7 @@ mod tests {
 
     #[test]
     fn fable_1m_model_without_incoming_context_1m_does_not_inject_beta() {
-        let mut account = test_account();
-        account.allow_1m_models = "fable".into();
+        let account = test_account();
         let rewriter = Rewriter::new();
 
         let headers = rewriter.rewrite_headers(
@@ -9107,18 +9129,23 @@ mod tests {
     // ---- matches_1m_whitelist ----
 
     #[test]
-    fn whitelist_default_opus_matches_opus_models() {
-        assert!(matches_1m_whitelist("claude-opus-4-7", "opus"));
-        assert!(matches_1m_whitelist("claude-opus-4-6", "opus"));
+    fn whitelist_default_opus_fable_matches_opus_and_fable() {
+        let default = crate::model::account::default_allow_1m_models();
+        assert!(matches_1m_whitelist("claude-opus-4-7", &default));
+        assert!(matches_1m_whitelist("claude-opus-5", &default));
+        assert!(matches_1m_whitelist("claude-fable-5", &default));
+        assert!(matches_1m_whitelist("claude-fable-5[1m]", &default));
         // 大小写不敏感
-        assert!(matches_1m_whitelist("Claude-Opus-4-7", "opus"));
-        assert!(matches_1m_whitelist("claude-opus-4-7", "OPUS"));
+        assert!(matches_1m_whitelist("Claude-Opus-4-7", &default));
+        assert!(matches_1m_whitelist("claude-opus-4-7", "OPUS,FABLE"));
     }
 
     #[test]
-    fn whitelist_default_opus_rejects_non_opus() {
-        assert!(!matches_1m_whitelist("claude-sonnet-4-5", "opus"));
-        assert!(!matches_1m_whitelist("claude-haiku-4-5", "opus"));
+    fn whitelist_default_opus_fable_rejects_sonnet_and_haiku() {
+        let default = crate::model::account::default_allow_1m_models();
+        assert!(!matches_1m_whitelist("claude-sonnet-4-5", &default));
+        assert!(!matches_1m_whitelist("claude-sonnet-5", &default));
+        assert!(!matches_1m_whitelist("claude-haiku-4-5", &default));
     }
 
     #[test]

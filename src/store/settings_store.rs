@@ -8,7 +8,8 @@ use crate::service::access_policy::{
 };
 
 /// 允许 `messages[].role=system` 的默认模型列表。
-pub const DEFAULT_ALLOW_SYSTEM_ROLE_MODELS: &str = "claude-opus-4-8";
+pub const DEFAULT_ALLOW_SYSTEM_ROLE_MODELS: &str =
+    "claude-opus-5,claude-sonnet-5,claude-opus-4-8";
 /// 默认允许的 Claude Code / Claude CLI 版本范围。
 pub const DEFAULT_ALLOWED_CLAUDE_CODE_VERSIONS_SETTING: &str = DEFAULT_ALLOWED_CLAUDE_CODE_VERSIONS;
 /// 默认允许的非 Claude Code 客户端 User-Agent。
@@ -45,7 +46,7 @@ pub const DEFAULT_REWRITE_DISABLED_THINKING_MODELS: &str = "claude-fable-5";
 pub const DEFAULT_INTERCEPT_ASSISTANT_PREFILL_ENABLED: &str = "false";
 /// 默认只覆盖当前事故相关模型,管理员可在设置页追加。
 pub const DEFAULT_INTERCEPT_ASSISTANT_PREFILL_MODELS: &str =
-    "claude-fable-5,claude-opus-4-8,claude-opus-4-7";
+    "claude-fable-5,claude-opus-5,claude-sonnet-5,claude-opus-4-8,claude-opus-4-7";
 /// 429 请求观测日志默认关闭,避免默认记录用户请求内容。
 pub const DEFAULT_LOG_429_REQUEST_ENABLED: &str = "false";
 /// 非流式 `/v1/messages` 请求观测日志默认关闭,避免默认记录用户请求内容。

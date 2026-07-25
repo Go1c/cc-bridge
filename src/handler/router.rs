@@ -358,7 +358,9 @@ async fn create_account(
         disable_reason: String::new(),
         auto_telemetry: req.auto_telemetry.unwrap_or(false),
         auto_poll_usage: req.auto_poll_usage.unwrap_or(false),
-        allow_1m_models: req.allow_1m_models.unwrap_or_else(|| "opus".to_string()),
+        allow_1m_models: req
+            .allow_1m_models
+            .unwrap_or_else(crate::model::account::default_allow_1m_models),
         telemetry_count: 0,
         usage_data: serde_json::json!({}),
         usage_fetched_at: None,
