@@ -16,7 +16,7 @@ use tokio::sync::{OwnedSemaphorePermit, RwLock};
 use tracing::{debug, info, warn};
 
 use crate::error::AppError;
-use crate::model::account::{Account, AccountStatus};
+use crate::model::account::Account;
 use crate::model::api_token::ApiToken;
 use crate::service::access_policy::{
     AccessPolicy, DEFAULT_ALLOWED_CLAUDE_CODE_VERSIONS, DEFAULT_ALLOWED_USER_AGENTS,
@@ -1748,25 +1748,18 @@ impl GatewayService {
             return Ok(response);
         }
 
-        // 处理认证失败：403 永久停用（但如果账号已处于 429 限流中则跳过，避免误判）
-        if status_code == 403 {
-            let is_rate_limited = account
-                .rate_limit_reset_at
-                .map(|reset| Utc::now() < reset)
-                .unwrap_or(false);
-            if is_rate_limited {
-                warn!(
-                    "account {} got 403 while rate-limited, skipping permanent disable",
-                    account.id
-                );
-            } else if let Err(e) = self
+        // 处理认证失败：401/403 永久停用（429 冷却期内跳过，避免误判）。
+        // 封号/撤权常见为 401 `OAuth access token has been revoked`，与 403 同等处置。
+        if status_code == 401 || status_code == 403 {
+            if let Err(e) = self
                 .account_svc
-                .disable_account(account.id, AccountStatus::Disabled, "403 认证失败", None)
+                .maybe_disable_on_auth_failure(account, status_code)
                 .await
             {
-                warn!("failed to disable account {} for 403: {}", account.id, e);
-            } else {
-                warn!("account {} permanently disabled for 403", account.id);
+                warn!(
+                    "failed to disable account {} for auth HTTP {}: {}",
+                    account.id, status_code, e
+                );
             }
         }
 

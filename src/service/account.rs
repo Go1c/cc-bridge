@@ -1119,6 +1119,51 @@ impl AccountService {
             .await
     }
 
+    /// 上游 401/403 认证失败时永久停用账号。
+    ///
+    /// Anthropic 在账号被封禁/撤权时可能返回 401（如 `OAuth access token has been revoked`）
+    /// 或 403。二者都应踢出调度，避免坏号继续被选中。
+    /// 若账号已处于 429 冷却期则跳过，避免限流附带的鉴权响应误杀。
+    ///
+    /// @return `Ok(true)` 表示已写入 disabled；`Ok(false)` 表示未处理或跳过。
+    pub async fn maybe_disable_on_auth_failure(
+        &self,
+        account: &Account,
+        status_code: u16,
+    ) -> Result<bool, AppError> {
+        if status_code != 401 && status_code != 403 {
+            return Ok(false);
+        }
+        let is_rate_limited = account
+            .rate_limit_reset_at
+            .map(|reset| Utc::now() < reset)
+            .unwrap_or(false);
+        if is_rate_limited {
+            warn!(
+                "account {} got {} while rate-limited, skipping permanent disable",
+                account.id, status_code
+            );
+            return Ok(false);
+        }
+        let reason = match status_code {
+            401 => "401 认证失败",
+            403 => "403 认证失败",
+            _ => "认证失败",
+        };
+        self.disable_account(
+            account.id,
+            crate::model::account::AccountStatus::Disabled,
+            reason,
+            None,
+        )
+        .await?;
+        warn!(
+            "account {} permanently disabled for {} (upstream HTTP {})",
+            account.id, reason, status_code
+        );
+        Ok(true)
+    }
+
     pub async fn enable_account(&self, id: i64) -> Result<(), AppError> {
         self.store.enable_account(id).await
     }

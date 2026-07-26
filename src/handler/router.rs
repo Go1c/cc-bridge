@@ -529,9 +529,33 @@ async fn test_account(
         .await
     {
         Ok(()) => Ok(Json(serde_json::json!({"status": "ok"}))),
-        Err(e) => Ok(Json(
-            serde_json::json!({"status": "error", "message": e.to_string()}),
-        )),
+        Err(e) => {
+            let message = e.to_string();
+            // 测号命中上游 401/403（含 OAuth revoked / 封禁）时永久停用，与主链路一致。
+            let mut disabled = false;
+            if let Some(status_code) = crate::service::oauth::parse_token_test_status(&message) {
+                match state
+                    .account_svc
+                    .maybe_disable_on_auth_failure(&account, status_code)
+                    .await
+                {
+                    Ok(did) => disabled = did,
+                    Err(disable_err) => {
+                        tracing::warn!(
+                            "test_account: failed to disable account {} after HTTP {}: {}",
+                            id,
+                            status_code,
+                            disable_err
+                        );
+                    }
+                }
+            }
+            Ok(Json(serde_json::json!({
+                "status": "error",
+                "message": message,
+                "disabled": disabled,
+            })))
+        }
     }
 }
 

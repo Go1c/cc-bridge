@@ -147,6 +147,50 @@ async fn test_429_account_excluded_from_schedulable_list() {
     assert!(!ids.contains(&a2.id));
 }
 
+
+// ─── 401 认证失败（封号/撤权）────────────────────────────────
+#[tokio::test]
+async fn test_401_auth_failure_disables_via_helper() {
+    let (_store, svc) = setup().await;
+    let account = create_test_account(&svc, "test401@example.com").await;
+
+    let did = svc
+        .maybe_disable_on_auth_failure(&account, 401)
+        .await
+        .expect("maybe_disable_on_auth_failure failed");
+    assert!(did);
+
+    let updated = svc.get_account(account.id).await.expect("get failed");
+    assert_eq!(updated.status, AccountStatus::Disabled);
+    assert_eq!(updated.disable_reason, "401 认证失败");
+    assert!(!updated.is_schedulable());
+}
+
+#[tokio::test]
+async fn test_401_skipped_while_rate_limited() {
+    let (_store, svc) = setup().await;
+    let account = create_test_account(&svc, "test401rl@example.com").await;
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    svc.disable_account(
+        account.id,
+        AccountStatus::Active,
+        "429 速率限制",
+        Some(reset_at),
+    )
+    .await
+    .expect("set rate limit failed");
+    let account = svc.get_account(account.id).await.expect("get failed");
+
+    let did = svc
+        .maybe_disable_on_auth_failure(&account, 401)
+        .await
+        .expect("maybe_disable");
+    assert!(!did);
+    let updated = svc.get_account(account.id).await.expect("get failed");
+    assert_eq!(updated.status, AccountStatus::Active);
+    assert_eq!(updated.disable_reason, "429 速率限制");
+}
+
 // ─── 403 认证失败测试 ────────────────────────────────────────
 
 #[tokio::test]

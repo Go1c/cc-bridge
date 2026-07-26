@@ -35,6 +35,16 @@ struct OAuthRefreshResponse {
     expires_in: i64,
 }
 
+/// 从 `TokenTester::test_token` 错误文案中解析上游 HTTP 状态码。
+///
+/// 错误格式固定为：`token test failed: status {CODE} ...`
+pub fn parse_token_test_status(err_msg: &str) -> Option<u16> {
+    let marker = "token test failed: status ";
+    let rest = err_msg.find(marker).map(|i| &err_msg[i + marker.len()..])?;
+    let code = rest.split_whitespace().next()?;
+    code.parse().ok()
+}
+
 /// 通过轻量级 API 调用验证 Setup Token。
 pub struct TokenTester;
 
@@ -193,4 +203,30 @@ pub async fn fetch_usage(token: &str, proxy_url: &str) -> Result<Value, AppError
         .await
         .map_err(|e| AppError::Internal(format!("usage parse failed: {}", e)))?;
     Ok(data)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::parse_token_test_status;
+
+    #[test]
+    fn parse_token_test_status_extracts_401() {
+        let msg = r#"internal: token test failed: status 401 Unauthorized {"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked."}}"#;
+        // AppError Display may prefix; function searches substring
+        let msg2 = r#"token test failed: status 401 Unauthorized {"type":"error"}"#;
+        assert_eq!(parse_token_test_status(msg2), Some(401));
+        assert_eq!(parse_token_test_status(msg), Some(401));
+    }
+
+    #[test]
+    fn parse_token_test_status_extracts_403() {
+        let msg = "token test failed: status 403 Forbidden no";
+        assert_eq!(parse_token_test_status(msg), Some(403));
+    }
+
+    #[test]
+    fn parse_token_test_status_none_on_unrelated() {
+        assert_eq!(parse_token_test_status("request failed: timeout"), None);
+    }
 }

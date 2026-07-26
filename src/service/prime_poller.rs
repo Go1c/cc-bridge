@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::{NaiveDate, Timelike, Utc};
+use chrono::{NaiveDate, Timelike};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
@@ -277,9 +277,9 @@ impl PrimePollerService {
 
     /// 根据上游 HTTP 状态码联动账号状态。
     ///
-    /// 与 `src/service/gateway.rs:359/369` 的处理保持一致:
+    /// 与 gateway 主链路保持一致:
     /// - 429 → `handle_rate_limit` 按类型/用量设置冷却;
-    /// - 403 且未处于 429 冷却期 → `disable_account` 永久停用,防止真实流量继续选中。
+    /// - 401/403 且未处于 429 冷却期 → 永久停用,防止真实流量继续选中。
     async fn apply_status_side_effects(&self, account: &Account, status: u16) {
         if status == 429 {
             // 预热请求体极小,不会触发长上下文计费类 429;此处无 retry-after/响应体/被动用量,
@@ -304,33 +304,15 @@ impl PrimePollerService {
             }
             return;
         }
-        if status == 403 {
-            // 账号可能已在 429 冷却期,此时 403 是冷却期的副作用响应,不做停用。
-            // 该判断与 gateway.rs 完全一致,避免误判断账号。
-            let is_rate_limited = account
-                .rate_limit_reset_at
-                .map(|reset| Utc::now() < reset)
-                .unwrap_or(false);
-            if is_rate_limited {
-                warn!(
-                    "prime poller: account {} got 403 while rate-limited, skipping disable",
-                    account.id
-                );
-                return;
-            }
+        if status == 401 || status == 403 {
             if let Err(e) = self
                 .account_svc
-                .disable_account(account.id, AccountStatus::Disabled, "403 认证失败", None)
+                .maybe_disable_on_auth_failure(account, status)
                 .await
             {
                 warn!(
-                    "prime poller: disable_account failed for account {}: {}",
+                    "prime poller: disable on auth failure failed for account {}: {}",
                     account.id, e
-                );
-            } else {
-                warn!(
-                    "prime poller: account {} permanently disabled for 403",
-                    account.id
                 );
             }
         }
