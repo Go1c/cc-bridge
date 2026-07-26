@@ -396,12 +396,13 @@ fn evaluate_account(
     // --- warm-up ---
     let warmup_active = is_warmup_active(account, pol.warmup_hours);
     if warmup_active {
+        let warm_conc = effective_concurrency(account, pol);
         findings.push(Finding {
             code: "warmup_active".into(),
             severity: FindingSeverity::Info,
             message: format!(
                 "新号 warm-up 中（{}h）：有效并发≤{}，RPM≤{}",
-                pol.warmup_hours, pol.warmup_concurrency, pol.warmup_rpm
+                pol.warmup_hours, warm_conc, pol.warmup_rpm
             ),
         });
     }
@@ -457,6 +458,9 @@ pub fn normalize_proxy_url(raw: &str) -> String {
 }
 
 fn is_warmup_active(account: &Account, warmup_hours: i64) -> bool {
+    if account.skip_warmup {
+        return false;
+    }
     if warmup_hours <= 0 {
         return false;
     }
@@ -467,7 +471,13 @@ fn is_warmup_active(account: &Account, warmup_hours: i64) -> bool {
 fn effective_concurrency(account: &Account, pol: &AntifraudPolicy) -> i32 {
     let base = account.concurrency.max(1);
     if is_warmup_active(account, pol.warmup_hours) {
-        base.min(pol.warmup_concurrency.max(1))
+        // 账号级覆盖优先：>0 时用该值作为 warm-up 并发上限；0 跟随全局策略。
+        let cap = if account.warmup_concurrency_override > 0 {
+            account.warmup_concurrency_override
+        } else {
+            pol.warmup_concurrency
+        };
+        base.min(cap.max(1))
     } else {
         base
     }
@@ -615,6 +625,8 @@ mod tests {
             organization_uuid: Some("org".into()),
             subscription_type: Some("max".into()),
             concurrency: 3,
+            warmup_concurrency_override: 0,
+            skip_warmup: false,
             priority: 50,
             rpm_limit: 0,
             rate_limited_at: None,
@@ -674,6 +686,54 @@ mod tests {
         assert_eq!(effective_concurrency(&a, &pol), 1);
         a.created_at = Utc::now() - chrono::Duration::hours(48);
         assert_eq!(effective_concurrency(&a, &pol), 5);
+    }
+
+    #[test]
+    fn skip_warmup_bypasses_warmup_limits() {
+        let mut a = sample_account();
+        a.created_at = Utc::now();
+        a.concurrency = 8;
+        a.skip_warmup = true;
+        a.warmup_concurrency_override = 2; // 跳过时应忽略
+        let pol = AntifraudPolicy {
+            warmup_hours: 24,
+            warmup_concurrency: 1,
+            warmup_rpm: 12,
+            ..AntifraudPolicy::default()
+        };
+        assert!(!is_warmup_active(&a, pol.warmup_hours));
+        assert_eq!(effective_concurrency(&a, &pol), 8);
+        // RPM 也不再被 warm-up 限制
+        a.rpm_limit = 0;
+        assert_eq!(effective_rpm_limit(&a, &pol), 0);
+        a.skip_warmup = false;
+        assert!(is_warmup_active(&a, pol.warmup_hours));
+        assert_eq!(effective_concurrency(&a, &pol), 2);
+    }
+
+    #[test]
+    fn account_warmup_concurrency_override_takes_priority() {
+        let mut a = sample_account();
+        a.created_at = Utc::now();
+        a.concurrency = 10;
+        a.warmup_concurrency_override = 5;
+        let pol = AntifraudPolicy {
+            warmup_hours: 24,
+            warmup_concurrency: 1,
+            ..AntifraudPolicy::default()
+        };
+        // 覆盖 5 < 账号并发 10 → 有效 5
+        assert_eq!(effective_concurrency(&a, &pol), 5);
+        // 覆盖高于账号并发时仍取 min
+        a.warmup_concurrency_override = 20;
+        assert_eq!(effective_concurrency(&a, &pol), 10);
+        // 0 = 跟随全局
+        a.warmup_concurrency_override = 0;
+        assert_eq!(effective_concurrency(&a, &pol), 1);
+        // warm-up 结束后忽略覆盖
+        a.warmup_concurrency_override = 5;
+        a.created_at = Utc::now() - chrono::Duration::hours(48);
+        assert_eq!(effective_concurrency(&a, &pol), 10);
     }
 
     #[test]

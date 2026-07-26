@@ -313,6 +313,8 @@ struct CreateAccountRequest {
     organization_uuid: Option<String>,
     subscription_type: Option<String>,
     concurrency: Option<i32>,
+    warmup_concurrency_override: Option<i32>,
+    skip_warmup: Option<bool>,
     priority: Option<i32>,
     rpm_limit: Option<i32>,
     auto_telemetry: Option<bool>,
@@ -351,6 +353,8 @@ async fn create_account(
         organization_uuid: req.organization_uuid,
         subscription_type: req.subscription_type,
         concurrency: req.concurrency.unwrap_or(3),
+        warmup_concurrency_override: req.warmup_concurrency_override.unwrap_or(0).max(0),
+        skip_warmup: req.skip_warmup.unwrap_or(false),
         priority: req.priority.unwrap_or(50),
         rpm_limit: req.rpm_limit.unwrap_or(0).max(0),
         rate_limited_at: None,
@@ -428,6 +432,12 @@ async fn update_account(
         if concurrency > 0 {
             existing.concurrency = concurrency as i32;
         }
+    }
+    if let Some(wco) = updates.get("warmup_concurrency_override").and_then(|v| v.as_i64()) {
+        existing.warmup_concurrency_override = wco.max(0) as i32;
+    }
+    if let Some(skip) = updates.get("skip_warmup").and_then(|v| v.as_bool()) {
+        existing.skip_warmup = skip;
     }
     if let Some(priority) = updates.get("priority").and_then(|v| v.as_i64()) {
         if priority > 0 {

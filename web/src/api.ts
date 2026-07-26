@@ -77,6 +77,10 @@ export interface Account {
   organization_uuid?: string | null
   subscription_type?: string | null
   concurrency: number
+  /** 新手期并发覆盖：0=跟随全局；>0 时该账号 warm-up 有效并发上限 */
+  warmup_concurrency_override?: number
+  /** 完全跳过新号 warm-up（并发/RPM 限制都不施加） */
+  skip_warmup?: boolean
   priority: number
   rpm_limit: number
   rpm_current?: number

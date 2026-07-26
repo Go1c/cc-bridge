@@ -1038,6 +1038,8 @@ mod tests {
             organization_uuid: Some("org-uuid".into()),
             subscription_type: Some("max".into()),
             concurrency: 3,
+            warmup_concurrency_override: 0,
+            skip_warmup: false,
             priority: 50,
             rpm_limit: 0,
             rate_limited_at: None,

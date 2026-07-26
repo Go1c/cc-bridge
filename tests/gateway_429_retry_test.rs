@@ -52,6 +52,8 @@ async fn create_test_account(svc: &AccountService, email: &str, priority: i32) -
         organization_uuid: None,
         subscription_type: None,
         concurrency: 3,
+        warmup_concurrency_override: 0,
+        skip_warmup: false,
         priority,
         rpm_limit: 0,
         rate_limited_at: None,

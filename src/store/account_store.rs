@@ -113,6 +113,10 @@ impl AccountStore {
                 .try_get::<Option<String>, _>("subscription_type")
                 .unwrap_or(None),
             concurrency: row.try_get::<i32, _>("concurrency").unwrap_or(3),
+            warmup_concurrency_override: row
+                .try_get::<i32, _>("warmup_concurrency_override")
+                .unwrap_or(0),
+            skip_warmup: row.try_get::<i32, _>("skip_warmup").unwrap_or(0) != 0,
             priority: row.try_get::<i32, _>("priority").unwrap_or(50),
             rpm_limit: row.try_get::<i32, _>("rpm_limit").unwrap_or(0),
             rate_limited_at: Self::parse_optional_time(row, "rate_limited_at"),
@@ -156,13 +160,14 @@ impl AccountStore {
 
         let auto_telemetry_int: i32 = if a.auto_telemetry { 1 } else { 0 };
         let auto_poll_usage_int: i32 = if a.auto_poll_usage { 1 } else { 0 };
+        let skip_warmup_int: i32 = if a.skip_warmup { 1 } else { 0 };
         let q = format!(
             r#"INSERT INTO accounts (name, email, status, token, proxy_url,
                 auth_type, access_token, refresh_token, oauth_expires_at, oauth_refreshed_at, auth_error,
                 device_id, canonical_env, canonical_prompt_env, canonical_process,
                 billing_mode, account_uuid, organization_uuid, subscription_type,
-                concurrency, priority, rpm_limit, auto_telemetry, auto_poll_usage, allow_1m_models)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,{},{},{},$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+                concurrency, warmup_concurrency_override, skip_warmup, priority, rpm_limit, auto_telemetry, auto_poll_usage, allow_1m_models)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,{},{},{},$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
             RETURNING id, created_at, updated_at"#,
             self.ts(9),
             self.ts(10),
@@ -189,6 +194,8 @@ impl AccountStore {
             .bind(&a.organization_uuid)
             .bind(&a.subscription_type)
             .bind(a.concurrency)
+            .bind(a.warmup_concurrency_override.max(0))
+            .bind(skip_warmup_int)
             .bind(a.priority)
             .bind(a.rpm_limit)
             .bind(auto_telemetry_int)
@@ -208,13 +215,14 @@ impl AccountStore {
         let oauth_refreshed_at = a.oauth_refreshed_at.map(|t| self.fmt_time(t));
         let auto_telemetry_int: i32 = if a.auto_telemetry { 1 } else { 0 };
         let auto_poll_usage_int: i32 = if a.auto_poll_usage { 1 } else { 0 };
+        let skip_warmup_int: i32 = if a.skip_warmup { 1 } else { 0 };
         let q = format!(
             r#"UPDATE accounts SET name=$1, email=$2, status=$3, token=$4,
                 auth_type=$5, access_token=$6, refresh_token=$7, oauth_expires_at={}, oauth_refreshed_at={},
                 auth_error=$10, proxy_url=$11, billing_mode=$12,
                 account_uuid=$13, organization_uuid=$14, subscription_type=$15,
-                concurrency=$16, priority=$17, rpm_limit=$18, auto_telemetry=$19, auto_poll_usage=$20, allow_1m_models=$21, updated_at={}
-            WHERE id=$22"#,
+                concurrency=$16, warmup_concurrency_override=$17, skip_warmup=$18, priority=$19, rpm_limit=$20, auto_telemetry=$21, auto_poll_usage=$22, allow_1m_models=$23, updated_at={}
+            WHERE id=$24"#,
             self.ts(8),
             self.ts(9),
             self.now_expr()
@@ -236,6 +244,8 @@ impl AccountStore {
             .bind(&a.organization_uuid)
             .bind(&a.subscription_type)
             .bind(a.concurrency)
+            .bind(a.warmup_concurrency_override.max(0))
+            .bind(skip_warmup_int)
             .bind(a.priority)
             .bind(a.rpm_limit)
             .bind(auto_telemetry_int)
@@ -460,7 +470,7 @@ const ACCOUNT_COLS: &str = r#"id, name, email, status, token, auth_type, access_
     oauth_expires_at, oauth_refreshed_at, auth_error, proxy_url, device_id,
     canonical_env, canonical_prompt_env, canonical_process,
     billing_mode, account_uuid, organization_uuid, subscription_type,
-    concurrency, priority, rpm_limit, rate_limited_at, rate_limit_reset_at,
+    concurrency, warmup_concurrency_override, skip_warmup, priority, rpm_limit, rate_limited_at, rate_limit_reset_at,
     disable_reason, auto_telemetry, auto_poll_usage, allow_1m_models, telemetry_count,
     usage_data, usage_fetched_at, created_at, updated_at"#;
 

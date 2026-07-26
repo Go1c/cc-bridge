@@ -167,6 +167,14 @@ pub struct Account {
     pub subscription_type: Option<String>,
     #[serde(default = "default_concurrency")]
     pub concurrency: i32,
+    /// 新手期（warm-up）并发覆盖：0=跟随全局 antifraud_warmup_concurrency；
+    /// >0 时该账号在 warm-up 期间使用 min(账号并发, 本值) 作为有效并发。
+    /// 若 skip_warmup=true，本字段无效。
+    #[serde(default)]
+    pub warmup_concurrency_override: i32,
+    /// 是否完全跳过新号 warm-up（并发/RPM 限制都不施加）。默认 false。
+    #[serde(default)]
+    pub skip_warmup: bool,
     #[serde(default = "default_priority")]
     pub priority: i32,
     /// 账号级每分钟请求数上限，0 表示不限制。

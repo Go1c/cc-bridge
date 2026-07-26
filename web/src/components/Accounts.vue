@@ -64,6 +64,8 @@ const form = ref({
   organization_uuid: '',
   subscription_type: '',
   concurrency: 3,
+  warmup_concurrency_override: 0,
+  skip_warmup: false,
   priority: 50,
   rpm_limit: 0,
   auto_telemetry: false,
@@ -145,6 +147,8 @@ function openCreate() {
     organization_uuid: '',
     subscription_type: '',
     concurrency: 3,
+    warmup_concurrency_override: 0,
+    skip_warmup: false,
     priority: 50,
     rpm_limit: 0,
     auto_telemetry: false,
@@ -174,6 +178,8 @@ function openEdit(a: Account) {
     organization_uuid: a.organization_uuid || '',
     subscription_type: a.subscription_type || '',
     concurrency: a.concurrency,
+    warmup_concurrency_override: a.warmup_concurrency_override ?? 0,
+    skip_warmup: a.skip_warmup ?? false,
     priority: a.priority,
     rpm_limit: a.rpm_limit ?? 0,
     auto_telemetry: a.auto_telemetry ?? false,
@@ -212,6 +218,8 @@ async function save() {
       updates.organization_uuid = form.value.organization_uuid || null;
       updates.subscription_type = form.value.subscription_type || null;
       updates.concurrency = form.value.concurrency;
+      updates.warmup_concurrency_override = form.value.warmup_concurrency_override;
+      updates.skip_warmup = form.value.skip_warmup;
       updates.priority = form.value.priority;
       updates.rpm_limit = form.value.rpm_limit;
       updates.auto_telemetry = form.value.auto_telemetry;
@@ -238,6 +246,8 @@ async function save() {
         organization_uuid: form.value.organization_uuid || null,
         subscription_type: form.value.subscription_type || null,
         concurrency: form.value.concurrency,
+        warmup_concurrency_override: form.value.warmup_concurrency_override,
+        skip_warmup: form.value.skip_warmup,
         priority: form.value.priority,
         rpm_limit: form.value.rpm_limit,
         auto_telemetry: form.value.auto_telemetry,
@@ -357,6 +367,7 @@ function antifraudStyle(a: Account): { class: string; label: string } {
   if (af.hard_block) return { class: 'bg-red-50 text-red-600 border-red-200', label: '门禁拦截' };
   if (!af.ok) return { class: 'bg-amber-50 text-amber-700 border-amber-200', label: '有风险' };
   if (af.warmup_active) return { class: 'bg-sky-50 text-sky-700 border-sky-200', label: 'Warm-up' };
+  if (a.skip_warmup) return { class: 'bg-violet-50 text-violet-700 border-violet-200', label: '跳过预热' };
   return { class: 'bg-emerald-50 text-emerald-700 border-emerald-200', label: '健康' };
 }
 
@@ -632,6 +643,8 @@ function applyOAuthResult() {
     organization_uuid: r.organization_uuid || '',
     subscription_type: '',
     concurrency: 3,
+    warmup_concurrency_override: 0,
+    skip_warmup: false,
     priority: 50,
     rpm_limit: 0,
     auto_telemetry: false,
@@ -1297,13 +1310,23 @@ async function copyText(text: string) {
               逗号分隔的子串列表(大小写不敏感)。留空 = 所有模型都过滤掉 context-1m-2025-08-07。默认 "opus,fable" 放行 Opus 家族与 Fable 5。
             </p>
           </div>
-          <div class="grid grid-cols-3 gap-3">
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div class="flex-1 space-y-2">
               <Label class="text-[#5c5647] text-sm">并发数</Label>
               <Input
                 v-model.number="form.concurrency"
                 type="number"
                 min="1"
+                class="bg-[#f9f6f1] border-[#e8e2d9] text-[#29261e] focus:border-[#c4704f] focus:ring-[#c4704f]/20"
+              />
+            </div>
+            <div class="flex-1 space-y-2">
+              <Label class="text-[#5c5647] text-sm">新手期并发</Label>
+              <Input
+                v-model.number="form.warmup_concurrency_override"
+                type="number"
+                min="0"
+                placeholder="0=跟随全局"
                 class="bg-[#f9f6f1] border-[#e8e2d9] text-[#29261e] focus:border-[#c4704f] focus:ring-[#c4704f]/20"
               />
             </div>
@@ -1327,6 +1350,37 @@ async function copyText(text: string) {
               />
             </div>
           </div>
+          <div class="space-y-2">
+            <Label class="text-[#5c5647] text-sm">跳过新手期（Warm-up）</Label>
+            <div class="flex gap-2">
+              <button
+                type="button"
+                @click="form.skip_warmup = false"
+                class="flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-all duration-200"
+                :class="!form.skip_warmup
+                  ? 'bg-[#f9f6f1] border-[#8c8475] text-[#5c5647]'
+                  : 'bg-[#f9f6f1] border-[#e8e2d9] text-[#8c8475] hover:border-[#8c8475]/40'"
+              >
+                遵循全局
+              </button>
+              <button
+                type="button"
+                @click="form.skip_warmup = true"
+                class="flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-all duration-200"
+                :class="form.skip_warmup
+                  ? 'bg-emerald-50 border-emerald-400 text-emerald-600'
+                  : 'bg-[#f9f6f1] border-[#e8e2d9] text-[#8c8475] hover:border-emerald-300'"
+              >
+                完全跳过
+              </button>
+            </div>
+            <p class="text-xs text-[#b5b0a6]">
+              开启后该账号立即按正常并发/RPM 调度，不进入 warm-up（无 w 标记）。其它账号仍走全局新手期策略。
+            </p>
+          </div>
+          <p class="text-xs text-[#b5b0a6] -mt-1" v-if="!form.skip_warmup">
+            新手期并发：0 = 跟随全局 Warm-up 并发上限；&gt;0 时该账号在 warm-up 期间用 min(并发数, 本值)。例如设 5 可让新号显示 x/5w。
+          </p>
 
           <DialogFooter class="gap-2 pt-2">
             <Button
