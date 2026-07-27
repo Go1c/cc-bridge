@@ -643,6 +643,9 @@ onMounted(async () => {
           <h3 class="text-sm font-semibold text-[#29261e]">assistant prefill 拦截</h3>
           <p class="text-xs text-[#8c8475] mt-1">
             开启后,命中模型且最后一条消息为 assistant 的 /v1/messages 请求会在本地返回 400,不进入账号选择、RPM、并发槽或上游转发。
+            <span class="font-medium">不是</span>
+            <span class="font-mono">messages[].role=system</span>
+            白名单；那一项在页面下方「系统角色模型」。
           </p>
         </div>
 
@@ -813,6 +816,12 @@ onMounted(async () => {
       <div class="p-6 space-y-4">
         <div>
           <h3 class="text-sm font-semibold text-[#29261e]">系统角色模型</h3>
+          <p class="text-xs text-[#8c8475] mt-1">
+            控制哪些模型允许在 <span class="font-mono">messages[].role=system</span> 里携带 system 消息（Claude Code 新模型常用）。请求体
+            <span class="font-mono">model</span> 不在此列表时，网关本地返回 400：
+            <span class="font-mono">messages[].role=system is not allowed for this model</span>，并在响应/日志中写出实际 model 与当前白名单。
+            <span class="font-medium">与下方「assistant prefill 拦截」无关</span>：那是拦截「最后一条是 assistant」的 prefill 请求。
+          </p>
         </div>
 
         <div class="space-y-2">
@@ -823,6 +832,10 @@ onMounted(async () => {
             class="border-[#e8e2d9] focus:ring-[#c4704f] font-mono text-sm"
             :class="isValidSystemRoleModels ? '' : 'border-red-400'"
           />
+          <p class="text-[11px] text-[#b5b0a6]">
+            精确匹配请求体 <span class="font-mono">model</span> 字段；空字符串表示不允许任何模型透传
+            <span class="font-mono">messages[].role=system</span>。顶层 <span class="font-mono">system</span> 字段不受此限制。
+          </p>
           <div class="flex flex-wrap gap-1.5">
             <span class="text-xs text-[#b5b0a6] self-center">预设:</span>
             <button

@@ -1027,6 +1027,10 @@ impl GatewayService {
                 .and_then(|m| m.as_str())
                 .unwrap_or_default();
             if !is_system_role_model_allowed(model, &allowed_models) {
+                warn!(
+                    "messages[].role=system rejected: model={} path={} allowed_system_role_models={:?}",
+                    model, path, *allowed_models
+                );
                 return Ok(system_role_model_error_response(model, &allowed_models));
             }
         }
