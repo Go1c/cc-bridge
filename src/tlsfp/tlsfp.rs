@@ -147,7 +147,7 @@ macro_rules! static_ref {
 }
 
 // ---------------------------------------------------------------------------
-// Bun/Node 密码套件（17 个，对齐本机 claude-cli/2.1.211 真实 ClientHello）
+// Bun/Node 密码套件（17 个，对齐本机 claude-cli/2.1.211+ 真实 ClientHello）
 // 顺序：TLS1.3(1301,1302,1303) → ECDHE-GCM → ChaCha20 → ECDHE-CBC → RSA-GCM → RSA-CBC
 // ---------------------------------------------------------------------------
 #[dynamic]
@@ -172,13 +172,13 @@ pub static NODEJS_CIPHER: Vec<GreaseOrCipher> = vec![
 ];
 
 // ---------------------------------------------------------------------------
-// Bun/Node 扩展列表（对齐本机 claude-cli/2.1.211 真实 ClientHello）
+// Bun/Node 扩展列表（对齐本机 claude-cli/2.1.211+ 真实 ClientHello）
 //
 // 抓包确认：
 // - ALPN 仅 `http/1.1`（无 h2）
 // - groups = X25519, secp256r1, secp384r1
 // - key_share 仅 X25519
-// - **无 padding(21)**（旧 2.1.183 画像含 padding，2.1.211 已去掉）
+// - **无 padding(21)**（旧 2.1.183 画像含 padding，2.1.211+ 已去掉）
 // - 带 SNI 时 JA3 hash = dc782a9d905fdcee1223a3d4e8108bc6
 // ---------------------------------------------------------------------------
 #[dynamic]
@@ -218,7 +218,7 @@ pub static NODEJS_EXTENSION: Vec<ExtensionSpec> = {
                 payload: Payload(vec![0x01, 0x00, 0x00, 0x00, 0x00]),
             },
         )),
-        // 9. signature_algorithms (13) — 9 项，对齐真实 claude-cli/2.1.211
+        // 9. signature_algorithms (13) — 9 项，对齐真实 claude-cli/2.1.211+
         Rustls(ClientExtension::SignatureAlgorithms(vec![
             SignatureScheme::ECDSA_NISTP256_SHA256, // 0x0403
             SignatureScheme::RSA_PSS_SHA256,        // 0x0804
@@ -248,7 +248,7 @@ pub static NODEJS_EXTENSION: Vec<ExtensionSpec> = {
             ],
             &[GreaseOrVersion]
         ))),
-        // 注意：2.1.211 真实 ClientHello **不含 padding(21)**。
+        // 注意：2.1.211+ 真实 ClientHello **不含 padding(21)**。
     ]
 };
 
@@ -353,11 +353,17 @@ pub fn make_request_client(proxy_url: &str) -> reqwest::Client {
     // 整体超时会误杀健康长流（Opus 扩展思考可持续数十分钟）；
     // 卡死连接的检测统一放到 gateway 层（tokio::time::timeout 包 send() 与 bytes_stream()）。
     //
+    // connect_timeout 与 TTFB 预算分离：TCP/代理/TLS 握手卡死应快失败（默认 15s），
+    // 而合法慢首 token（Opus/长上下文）仍由 gateway 的 UPSTREAM_TTFB_TIMEOUT 覆盖。
+    // 注意：reqwest 的 connect_timeout 覆盖 TCP connect + TLS handshake；代理 CONNECT 隧道
+    // 在部分路径上也可能计入。一旦连接建立并完成 body 上传，等待响应头仍走 TTFB 预算。
+    //
     // 保活: tcp_keepalive OS 层 SO_KEEPALIVE + KEEPIDLE=30s,idle 30s 后发 TCP 探测包。
     // HTTP/2 PING 因 craftls 指纹 ALPN 只声明 http/1.1,永远协商不出 h2,故不配置。
+    let connect_timeout = crate::config::upstream_timeout_config().connect_timeout;
     let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls(tls_config)
-        .connect_timeout(Duration::from_secs(30))
+        .connect_timeout(connect_timeout)
         .tcp_keepalive(Duration::from_secs(30))
         .no_proxy();
 

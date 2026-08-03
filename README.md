@@ -165,6 +165,12 @@ curl http://127.0.0.1:5674/v1/messages \
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `ADMIN_PASSWORD` | `admin` | 管理后台密码 |
 | `USAGE_POLL_INTERVAL_SECS` | `300` | OAuth 账号用量后台自动刷新间隔（秒） |
+| `UPSTREAM_TTFB_TIMEOUT_SECS` | `120` | 上游 TTFB（send→响应头）超时秒数 |
+| `UPSTREAM_CONNECT_TIMEOUT_SECS` | `15` | TCP/代理/TLS 连接超时秒数（快失败） |
+| `UPSTREAM_TTFB_RETRY_ENABLED` | `true` | 预响应同账号安全重试开关 |
+| `UPSTREAM_TTFB_RETRY_MAX` | `1` | 同账号额外重试次数上限（不含首次） |
+
+> **TTFB ≠ 429**：单请求 hang 不隔离账号。同一账号可一边正常服务其他请求，一边有请求挂满 TTFB；归因日志 + connect 快失败 + 预响应安全重试是单账号场景的实用缓解。
 
 ### 数据库
 
@@ -520,7 +526,7 @@ cc-bridge/
 
 网关通过全局 settings 控制客户端入口访问，校验发生在账号选择和上游请求之前：
 
-- `allowed_claude_code_versions`：只作用于 `claude-code/` / `claude-cli/` UA，默认 `2.1.89-2.1.999`（入口准入；出口伪装仍默认 2.1.211）
+- `allowed_claude_code_versions`：只作用于 `claude-code/` / `claude-cli/` UA，默认 `2.1.89-2.1.999`（入口准入；出口伪装仍默认 2.1.212）
 - `allowed_user_agents`：只作用于非 Claude Code / CLI UA，默认允许 `AI-Hub-Monitor*` 和 `python-httpx*`
 - 版本规则支持精确版本、通配和闭区间，例如 `2.1.211`、`2.1.*`、`2.1.89-2.1.999`
 - UA 规则支持 `*` 通配，例如 `AI-Hub-Monitor*`、`python-httpx*`
@@ -589,7 +595,7 @@ cc-bridge/
 
 ### 请求头改写
 
-- 默认 Claude Code 指纹为 `2.1.211`（对齐本机真实 CLI），新账号的 `version` / `version_base` / `build_time` 会按该版本生成；启动迁移会把已有账号的这三个版本字段升级到当前默认值
+- 默认 Claude Code 指纹为 `2.1.212`（对齐本机真实 CLI），新账号的 `version` / `version_base` / `build_time` 会按该版本生成；启动迁移会把已有账号的这三个版本字段升级到当前默认值
 - `/v1/messages` 使用 `claude-cli/<version> (external, sdk-cli)`、`X-Stainless-Package-Version=0.94.0`、`X-Stainless-Runtime-Version=v26.3.0`、`X-Stainless-OS=MacOS`（darwin）
 - `/api/event_logging/v2/batch` 使用 `claude-code/<version>`、`anthropic-beta=oauth-2025-04-20`、`x-service-name=claude-code`
 - `/api/eval/*` 使用抓包中的 `Bun/1.4.0` UA
@@ -669,7 +675,7 @@ CCH attestation 重新计算之前完成。
 
 ### Billing / CCH 策略
 
-`billing_mode=rewrite` 会按版本改写 `cc_version` / `cch`。Claude Code `2.1.211` 真实抓包为 `cc_entrypoint=sdk-cli` 且 **不再发送 `cch=`**；`cc_version` 后缀公式仍沿用 JS 字符串索引语义。旧版本若仍带 `cch`：`2.1.156` / `2.1.169` 使用完整最终 body 与 seed `0x4D659218E32A3268`；`2.1.172` / `2.1.173` 继续使用同 seed，但计算前会把顶层 `model` 值替换为 `""`，并排除顶层 `max_tokens` / `fallbacks` 字段。旧版本继续使用旧 seed `0x6E52736AC806831E`。
+`billing_mode=rewrite` 会按版本改写 `cc_version` / `cch`。Claude Code `2.1.211`/`2.1.212` 真实抓包为 `cc_entrypoint=sdk-cli` 且 **不再发送 `cch=`**；`cc_version` 后缀公式仍沿用 JS 字符串索引语义。旧版本若仍带 `cch`：`2.1.156` / `2.1.169` 使用完整最终 body 与 seed `0x4D659218E32A3268`；`2.1.172` / `2.1.173` 继续使用同 seed，但计算前会把顶层 `model` 值替换为 `""`，并排除顶层 `max_tokens` / `fallbacks` 字段。旧版本继续使用旧 seed `0x6E52736AC806831E`。
 
 ### TLS 指纹
 

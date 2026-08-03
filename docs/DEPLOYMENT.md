@@ -9,7 +9,7 @@
 | [CLAUDE.md](../CLAUDE.md) | 开发架构速览 |
 | [.env.example](../.env.example) | 环境变量模板 |
 
-当前默认协议画像：**Claude Code 2.1.211**。二进制名：`claude-code-gateway`（镜像/项目名见 `.version`）。
+当前默认协议画像：**Claude Code 2.1.212**。二进制名：`claude-code-gateway`（镜像/项目名见 `.version`）。
 
 ---
 
@@ -431,6 +431,12 @@ LOG_LEVEL=info
 | `ADMIN_PASSWORD` | `admin` | 管理后台密码，**生产必改** |
 | `LOG_LEVEL` | `info` | debug/info/warn/error |
 | `USAGE_POLL_INTERVAL_SECS` | `300` | OAuth 用量轮询间隔 |
+| `UPSTREAM_TTFB_TIMEOUT_SECS` | `120` | 上游 TTFB（send→响应头）超时 |
+| `UPSTREAM_CONNECT_TIMEOUT_SECS` | `15` | TCP/代理/TLS 连接超时（快失败） |
+| `UPSTREAM_TTFB_RETRY_ENABLED` | `true` | 预响应同账号安全重试 |
+| `UPSTREAM_TTFB_RETRY_MAX` | `1` | 额外重试次数上限（不含首次） |
+
+> TTFB hang 是 **per-request**，**不会**按 429 隔离/禁用账号。详见 CHANGELOG 中上游 TTFB 硬化说明。
 
 #### 数据库
 
@@ -603,9 +609,9 @@ Content-Type: application/json
 | 配置 | 层 | 默认 |
 |------|----|------|
 | `allowed_claude_code_versions` | 客户端能否进网关 | `2.1.89-2.1.999` |
-| 账号画像 / `version_profile` | 发给 Anthropic 的伪装 | **2.1.211** |
+| 账号画像 / `version_profile` | 发给 Anthropic 的伪装 | **2.1.212** |
 
-用户客户端可以是 2.1.212；上游仍按网关改写后的 2.1.211 画像（除非改账号 env）。
+用户客户端可以是 2.1.212；上游默认按网关改写后的 2.1.212 画像（除非改账号 env）。
 
 ### 升级后账号全被拦
 
@@ -707,7 +713,7 @@ docker compose logs -f --tail=100
 启动后建议检查：
 
 - 日志无 migrate 错误
-- 账号 `canonical_env.version` 是否为目标画像（如 2.1.211）
+- 账号 `canonical_env.version` 是否为目标画像（如 2.1.212）
 - 防封徽章是否异常大面积「门禁拦截」
 
 ---

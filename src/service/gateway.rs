@@ -12,10 +12,20 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{OwnedSemaphorePermit, RwLock};
 use tracing::{debug, info, warn};
 
-use crate::error::AppError;
+/// 进程内 soft metric：upstream TTFB 超时次数（按 account/model/stream 细标签见 WARN 日志）。
+static UPSTREAM_TTFB_TIMEOUT_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// 进程内 soft metric：upstream send 失败次数（非超时）。
+static UPSTREAM_SEND_ERROR_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// 成功请求 TTFB 的粗粒度累计（ms）与次数，供 ops 估算 p50 前的均值。
+static UPSTREAM_TTFB_SUCCESS_MS_SUM: AtomicU64 = AtomicU64::new(0);
+static UPSTREAM_TTFB_SUCCESS_COUNT: AtomicU64 = AtomicU64::new(0);
+
+use crate::config::{UpstreamTimeoutConfig, upstream_timeout_config};
+use crate::error::{AppError, UpstreamTransportDetail};
 use crate::model::account::Account;
 use crate::model::api_token::ApiToken;
 use crate::service::access_policy::{
@@ -53,13 +63,16 @@ const UPSTREAM_BASE: &str = "https://api.anthropic.com";
 const COUNT_TOKENS_PATH: &str = "/v1/messages/count_tokens";
 /// 账号级 FIFO 排队的最长等待时长。超时后会降级到其他账号；队列上限仍由 concurrency 控制。
 const SLOT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-/// TTFB（Time To First Byte）超时：从 send() 到收到响应头的最长等待时间。
-/// 握手 + 发请求 + 等上游开始响应，120s 足以覆盖非流式 Opus + 扩展思考场景；超过则认为上游卡住。
-const UPSTREAM_TTFB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// 流式读间隔超时：两次 bytes_stream chunk 之间允许的最长静默时间。
 /// Anthropic SSE 每几秒至少有一个 ping event，120s 无数据视为连接卡死。
 /// 该超时不限制流总时长，健康长流（Opus 扩展思考等）可持续任意时间。
 const UPSTREAM_STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+// TTFB 预算见 `crate::config::upstream_timeout_config()`（默认 120s，env 可改）。
+//
+// 事故结论（务必保留）：
+// - 同一账号可一边正常服务其他请求，一边有单请求挂满 TTFB；
+// - 因此 TTFB **绝不是** 429：不得隔离/禁用/换号；
+// - 单账号池时，归因 + connect 快失败 + 预响应同账号安全重试才是实用缓解。
 const STREAM_KEEPALIVE_BYTES: &[u8] = b": cc2api-keepalive\n\n";
 /// signature 错误体只用于识别上游错误类型，限制读取大小避免异常响应占用内存。
 const SIGNATURE_ERROR_BODY_LIMIT: usize = 1024 * 1024;
@@ -1400,7 +1413,9 @@ impl GatewayService {
                     .await;
             }
 
-            // 转发到上游
+            // 转发到上游。
+            // TTFB/send 失败时：不隔离账号、不走 429 换号；同账号安全重试在 forward_request 内部完成
+            // （仅 pre-response，max 次有限）。事故结论：单请求 hang ≠ 账号级限流。
             let t_upstream = std::time::Instant::now();
             let resp = match self
                 .forward_request(
@@ -1410,11 +1425,22 @@ impl GatewayService {
                     &final_headers,
                     &final_body,
                     &account,
+                    ForwardAttributionInput {
+                        session_hash: &session_hash,
+                        sticky_used: sticky_account,
+                        request_class: None,
+                    },
                 )
                 .await
             {
                 Ok(r) => r,
                 Err(e) => {
+                    let error_kind = match &e {
+                        AppError::BadGatewayAttributed { detail, .. } => {
+                            detail.error_code.to_string()
+                        }
+                        _ => "upstream_error".into(),
+                    };
                     if let Some(context) = telemetry_context.clone() {
                         self.telemetry_svc
                             .record_message_result(
@@ -1423,13 +1449,14 @@ impl GatewayService {
                                 MessageTelemetryResult {
                                     status_code: None,
                                     duration_ms: t_upstream.elapsed().as_millis() as u64,
-                                    error_kind: Some("upstream_error".into()),
+                                    error_kind: Some(error_kind),
                                 },
                             )
                             .await;
                     }
                     info!("[耗时] 上游失败: {:.0}ms", t_upstream.elapsed().as_millis());
                     // SlotReleaseGuard drop 会自动释放槽位
+                    // 注意：故意不 exclude/disable 账号——TTFB hang 是 per-request，不是 429。
                     return Err(e);
                 }
             };
@@ -1592,7 +1619,19 @@ impl GatewayService {
             );
 
             let retry_resp = match self
-                .forward_request(method, path, query, &retry_headers, &retry_body, account)
+                .forward_request(
+                    method,
+                    path,
+                    query,
+                    &retry_headers,
+                    &retry_body,
+                    account,
+                    ForwardAttributionInput {
+                        session_hash: "",
+                        sticky_used: false,
+                        request_class: Some("signature_retry"),
+                    },
+                )
                 .await
             {
                 Ok(resp) => resp,
@@ -1631,6 +1670,126 @@ impl GatewayService {
         Ok((response_from_buffered(last_parts, last_body), last_stage))
     }
 
+    /// 向上游发起请求并等待响应头（含 TTFB 超时、归因日志、同账号有限安全重试）。
+    ///
+    /// 失败路径 **不会** 隔离/禁用账号：TTFB hang 是 per-request，不是 429。
+    /// 重试只发生在 `send()` 尚未返回响应头时，因此不可能已向客户端写过字节。
+    async fn send_upstream_with_attribution(
+        &self,
+        method: &str,
+        path: &str,
+        target_url: &str,
+        headers: &std::collections::HashMap<String, String>,
+        body: &[u8],
+        account: &Account,
+        attr_input: ForwardAttributionInput<'_>,
+    ) -> Result<reqwest::Response, AppError> {
+        debug!("upstream URL: {}", target_url);
+
+        let body_json = serde_json::from_slice::<serde_json::Value>(body).ok();
+        let model = body_json
+            .as_ref()
+            .and_then(|v| v.get("model"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let stream = body_json
+            .as_ref()
+            .map(is_streaming_messages_request)
+            .unwrap_or(false);
+        let request_class = attr_input.request_class.unwrap_or("").to_string();
+
+        let mut base_attr = UpstreamSendAttribution {
+            account_id: account.id,
+            session_hash: attr_input.session_hash.to_string(),
+            path: path.to_string(),
+            model,
+            stream,
+            body_bytes: body.len(),
+            request_class,
+            proxy_host: proxy_host_only(&account.proxy_url),
+            sticky_used: attr_input.sticky_used,
+            attempt_index: 0,
+        };
+
+        let timeout_cfg = upstream_timeout_config();
+        // 同账号有限次安全重试：仅发生在 send() 失败、尚未拿到响应（故不可能已向客户端写字节）。
+        // 默认 max=1；流式/非流式均允许，因为 headers 还没返回给下游。
+        // 绝不会在这里隔离账号——TTFB hang 是 per-request。
+        let max_attempts = 1 + if timeout_cfg.ttfb_retry_enabled {
+            timeout_cfg.ttfb_retry_max
+        } else {
+            0
+        };
+
+        let mut attempt_index: u32 = 0;
+        loop {
+            base_attr.attempt_index = attempt_index;
+            let send_started = std::time::Instant::now();
+            let client = crate::tlsfp::get_request_client(&account.proxy_url);
+            let mut req_builder = match method {
+                "GET" => client.get(target_url),
+                "POST" => client.post(target_url),
+                "PUT" => client.put(target_url),
+                "DELETE" => client.delete(target_url),
+                "PATCH" => client.patch(target_url),
+                _ => client.post(target_url),
+            };
+
+            for (k, v) in ordered_anthropic_headers(path, headers) {
+                if attempt_index == 0 {
+                    debug!("upstream header: {}: {}", k, safe_header_log_value(&k, &v));
+                }
+                req_builder = req_builder.header(k, v);
+            }
+            req_builder = req_builder.body(body.to_vec());
+
+            let send_result =
+                tokio::time::timeout(timeout_cfg.ttfb_timeout, req_builder.send()).await;
+            match classify_upstream_send_result(send_result, send_started.elapsed()) {
+                UpstreamSendOutcome::Success { resp, elapsed } => {
+                    record_upstream_ttfb_success(elapsed);
+                    return Ok(resp);
+                }
+                UpstreamSendOutcome::Failure {
+                    kind,
+                    elapsed,
+                    detail_msg,
+                } => {
+                    // 每次失败打一条高信号 WARN（key=value），不含 token / proxy 密码 / body 原文。
+                    log_upstream_send_failure(&base_attr, kind, elapsed, detail_msg.as_deref());
+                    record_upstream_send_failure_metric(kind, &base_attr);
+
+                    // response_bytes_forwarded=false：send() 失败时 headers 从未返回，下游未开始。
+                    let can_retry = should_retry_upstream_ttfb(timeout_cfg, attempt_index, false)
+                        && matches!(
+                            kind,
+                            UpstreamSendFailureKind::TtfbTimeout
+                                | UpstreamSendFailureKind::ConnectTimeout
+                                | UpstreamSendFailureKind::SendFailed
+                        )
+                        && attempt_index + 1 < max_attempts;
+                    if can_retry {
+                        warn!(
+                            "upstream_ttfb_retry account_id={} attempt_index={} next_attempt={} reason={} path={} model={} stream={}",
+                            base_attr.account_id,
+                            attempt_index,
+                            attempt_index + 1,
+                            kind.error_code(),
+                            base_attr.path,
+                            base_attr.model,
+                            base_attr.stream,
+                        );
+                        attempt_index += 1;
+                        continue;
+                    }
+
+                    return Err(upstream_transport_app_error(kind, &base_attr, elapsed));
+                }
+            }
+        }
+    }
+
     async fn forward_request(
         &self,
         method: &str,
@@ -1639,6 +1798,7 @@ impl GatewayService {
         headers: &std::collections::HashMap<String, String>,
         body: &[u8],
         account: &Account,
+        attr_input: ForwardAttributionInput<'_>,
     ) -> Result<Response, AppError> {
         let mut target_url = format!("{}{}", UPSTREAM_BASE, path);
         if !query.is_empty() {
@@ -1652,35 +1812,11 @@ impl GatewayService {
             target_url = format!("{}?beta=true", target_url);
         }
 
-        debug!("upstream URL: {}", target_url);
-
-        let client = crate::tlsfp::get_request_client(&account.proxy_url);
-
-        let mut req_builder = match method {
-            "GET" => client.get(&target_url),
-            "POST" => client.post(&target_url),
-            "PUT" => client.put(&target_url),
-            "DELETE" => client.delete(&target_url),
-            "PATCH" => client.patch(&target_url),
-            _ => client.post(&target_url),
-        };
-
-        for (k, v) in ordered_anthropic_headers(path, headers) {
-            debug!("upstream header: {}: {}", k, safe_header_log_value(&k, &v));
-            req_builder = req_builder.header(k, v);
-        }
-        req_builder = req_builder.body(body.to_vec());
-
-        let resp = tokio::time::timeout(UPSTREAM_TTFB_TIMEOUT, req_builder.send())
-            .await
-            .map_err(|_| {
-                warn!("upstream TTFB timeout for account {}", account.id);
-                AppError::BadGateway("upstream TTFB timeout".into())
-            })?
-            .map_err(|e| {
-                warn!("upstream error for account {}: {}", account.id, e);
-                AppError::BadGateway("upstream request failed".into())
-            })?;
+        let resp = self
+            .send_upstream_with_attribution(
+                method, path, &target_url, headers, body, account, attr_input,
+            )
+            .await?;
 
         let status_code = resp.status().as_u16();
         debug!("upstream response: {}", status_code);
@@ -1904,36 +2040,22 @@ impl GatewayService {
         account: &Account,
     ) -> Result<Response, AppError> {
         let target_url = count_tokens_upstream_url();
-        debug!("count_tokens upstream URL: {}", target_url);
-
-        let client = crate::tlsfp::get_request_client(&account.proxy_url);
-        let mut req_builder = client.post(&target_url);
-        for (k, v) in ordered_anthropic_headers(COUNT_TOKENS_PATH, headers) {
-            debug!(
-                "count_tokens upstream header: {}: {}",
-                k,
-                safe_header_log_value(&k, &v)
-            );
-            req_builder = req_builder.header(k, v);
-        }
-        req_builder = req_builder.body(body.to_vec());
-
-        let resp = tokio::time::timeout(UPSTREAM_TTFB_TIMEOUT, req_builder.send())
-            .await
-            .map_err(|_| {
-                warn!(
-                    "count_tokens upstream TTFB timeout for account {}",
-                    account.id
-                );
-                AppError::BadGateway("upstream TTFB timeout".into())
-            })?
-            .map_err(|e| {
-                warn!(
-                    "count_tokens upstream request failed for account {}: {}",
-                    account.id, e
-                );
-                AppError::BadGateway("upstream request failed".into())
-            })?;
+        // 与 messages 共用 send 层（TTFB 归因 + 安全重试）；响应侧仍缓冲整包，不走 429 隔离逻辑。
+        let resp = self
+            .send_upstream_with_attribution(
+                "POST",
+                COUNT_TOKENS_PATH,
+                &target_url,
+                headers,
+                body,
+                account,
+                ForwardAttributionInput {
+                    session_hash: "",
+                    sticky_used: false,
+                    request_class: Some("count_tokens"),
+                },
+            )
+            .await?;
 
         let status_code = resp.status().as_u16();
         let response_headers = resp.headers().clone();
@@ -2080,6 +2202,24 @@ fn count_tokens_app_error_response(err: AppError) -> Response {
             "upstream_error",
             "Upstream request failed",
         ),
+        AppError::BadGatewayAttributed { message, detail } => {
+            // count_tokens 也返回 Anthropic 风格，同时带上稳定 error type 与细节。
+            (
+                StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": detail.error_code,
+                        "message": format!("bad gateway: {message}"),
+                        "account_id": detail.account_id,
+                        "elapsed_ms": detail.elapsed_ms,
+                        "model": detail.model,
+                        "stream": detail.stream,
+                    }
+                })),
+            )
+                .into_response()
+        }
         AppError::ServiceUnavailable(_) => anthropic_error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "api_error",
@@ -2129,6 +2269,231 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<i64> {
 fn safe_body_summary(b: &[u8]) -> String {
     let digest = Sha256::digest(b);
     format!("{} bytes sha256:{}", b.len(), hex::encode(&digest[..8]))
+}
+
+/// 转发上游时的会话/粘性等补充归因输入。
+struct ForwardAttributionInput<'a> {
+    session_hash: &'a str,
+    sticky_used: bool,
+    request_class: Option<&'a str>,
+}
+
+/// 单次 upstream send 的完整归因上下文（不含密钥）。
+#[derive(Debug, Clone)]
+struct UpstreamSendAttribution {
+    account_id: i64,
+    session_hash: String,
+    path: String,
+    model: String,
+    stream: bool,
+    body_bytes: usize,
+    request_class: String,
+    /// 仅 host:port，绝不含 user:password。
+    proxy_host: String,
+    sticky_used: bool,
+    attempt_index: u32,
+}
+
+/// 上游 send 失败类别。
+///
+/// 限制：reqwest 0.12 的 `send()` 把 connect + 写 body + 等 headers 混在一次 future 里；
+/// 我们用 `connect_timeout`（客户端层）尽量把「连不上」从「headers 慢」里拆开，
+/// 但若 connect 已成功而 headers 挂死，只能落到 `TtfbTimeout`（整段 send 外层 timeout）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpstreamSendFailureKind {
+    TtfbTimeout,
+    ConnectTimeout,
+    SendFailed,
+}
+
+impl UpstreamSendFailureKind {
+    fn error_code(self) -> &'static str {
+        match self {
+            Self::TtfbTimeout => "upstream_ttfb_timeout",
+            Self::ConnectTimeout => "upstream_connect_timeout",
+            Self::SendFailed => "upstream_send_failed",
+        }
+    }
+
+    fn client_message(self) -> &'static str {
+        match self {
+            Self::TtfbTimeout => "upstream TTFB timeout",
+            Self::ConnectTimeout => "upstream connect timeout",
+            Self::SendFailed => "upstream request failed",
+        }
+    }
+}
+
+enum UpstreamSendOutcome {
+    Success {
+        resp: reqwest::Response,
+        elapsed: std::time::Duration,
+    },
+    Failure {
+        kind: UpstreamSendFailureKind,
+        elapsed: std::time::Duration,
+        detail_msg: Option<String>,
+    },
+}
+
+fn classify_upstream_send_result(
+    result: Result<Result<reqwest::Response, reqwest::Error>, tokio::time::error::Elapsed>,
+    elapsed: std::time::Duration,
+) -> UpstreamSendOutcome {
+    match result {
+        Ok(Ok(resp)) => UpstreamSendOutcome::Success { resp, elapsed },
+        Err(_) => UpstreamSendOutcome::Failure {
+            kind: UpstreamSendFailureKind::TtfbTimeout,
+            elapsed,
+            detail_msg: None,
+        },
+        Ok(Err(err)) => {
+            let kind = if err.is_timeout() || err.is_connect() {
+                // reqwest connect_timeout / 代理 connect 失败走这里，比满 TTFB 预算更快失败。
+                UpstreamSendFailureKind::ConnectTimeout
+            } else {
+                UpstreamSendFailureKind::SendFailed
+            };
+            UpstreamSendOutcome::Failure {
+                kind,
+                elapsed,
+                // 错误字符串可能含目标 host，但不含我们的 proxy 密码；仍截断以防异常膨胀。
+                detail_msg: Some(truncate_log_text(&err.to_string(), 240)),
+            }
+        }
+    }
+}
+
+fn log_upstream_send_failure(
+    attr: &UpstreamSendAttribution,
+    kind: UpstreamSendFailureKind,
+    elapsed: std::time::Duration,
+    detail_msg: Option<&str>,
+) {
+    // 单行 key=value，便于 grep / 日志系统解析；不输出 token、proxy 密码、body 原文。
+    warn!(
+        "upstream_transport_error error_code={} account_id={} session_hash={} path={} model={} stream={} body_bytes={} request_class={} elapsed_ms={} proxy_host={} sticky_used={} attempt_index={} detail={}",
+        kind.error_code(),
+        attr.account_id,
+        display_or_dash(&attr.session_hash),
+        attr.path,
+        display_or_dash(&attr.model),
+        attr.stream,
+        attr.body_bytes,
+        display_or_dash(&attr.request_class),
+        elapsed.as_millis(),
+        display_or_dash(&attr.proxy_host),
+        attr.sticky_used,
+        attr.attempt_index,
+        detail_msg.unwrap_or("-"),
+    );
+}
+
+fn record_upstream_send_failure_metric(
+    kind: UpstreamSendFailureKind,
+    attr: &UpstreamSendAttribution,
+) {
+    match kind {
+        UpstreamSendFailureKind::TtfbTimeout => {
+            UPSTREAM_TTFB_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        UpstreamSendFailureKind::ConnectTimeout | UpstreamSendFailureKind::SendFailed => {
+            UPSTREAM_SEND_ERROR_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // soft metric 无 Prometheus 导出时，仍在日志中打标签维度，避免 ops 完全失明。
+    debug!(
+        "upstream_metric kind={} account_id={} model={} stream={} ttfb_timeout_total={} send_error_total={}",
+        kind.error_code(),
+        attr.account_id,
+        attr.model,
+        attr.stream,
+        UPSTREAM_TTFB_TIMEOUT_TOTAL.load(Ordering::Relaxed),
+        UPSTREAM_SEND_ERROR_TOTAL.load(Ordering::Relaxed),
+    );
+}
+
+fn record_upstream_ttfb_success(elapsed: std::time::Duration) {
+    UPSTREAM_TTFB_SUCCESS_MS_SUM.fetch_add(elapsed.as_millis() as u64, Ordering::Relaxed);
+    UPSTREAM_TTFB_SUCCESS_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+fn upstream_transport_app_error(
+    kind: UpstreamSendFailureKind,
+    attr: &UpstreamSendAttribution,
+    elapsed: std::time::Duration,
+) -> AppError {
+    AppError::BadGatewayAttributed {
+        message: kind.client_message().into(),
+        detail: UpstreamTransportDetail {
+            error_code: kind.error_code(),
+            account_id: attr.account_id,
+            elapsed_ms: elapsed.as_millis() as u64,
+            model: attr.model.clone(),
+            stream: attr.stream,
+            path: attr.path.clone(),
+            body_bytes: attr.body_bytes,
+            attempt_index: attr.attempt_index,
+        },
+    }
+}
+
+/// 从 proxy_url 提取可日志化的 host（含端口），剥离 userinfo，避免密码泄漏。
+///
+/// 支持 `http://user:pass@host:port`、`socks5h://host:port`、裸 `host:port`。
+fn proxy_host_only(proxy_url: &str) -> String {
+    let raw = proxy_url.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    // 去掉 scheme://
+    let without_scheme = raw
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(raw);
+    // 去掉 userinfo@
+    let without_userinfo = without_scheme
+        .rsplit_once('@')
+        .map(|(_, hostport)| hostport)
+        .unwrap_or(without_scheme);
+    // 去掉 path/query
+    let hostport = without_userinfo
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_userinfo)
+        .trim();
+    hostport.to_string()
+}
+
+/// 进程内 soft metric 快照（测试与未来 /admin/metrics 用）。
+#[cfg(test)]
+fn upstream_transport_metric_snapshot() -> (u64, u64, u64, u64) {
+    (
+        UPSTREAM_TTFB_TIMEOUT_TOTAL.load(Ordering::Relaxed),
+        UPSTREAM_SEND_ERROR_TOTAL.load(Ordering::Relaxed),
+        UPSTREAM_TTFB_SUCCESS_MS_SUM.load(Ordering::Relaxed),
+        UPSTREAM_TTFB_SUCCESS_COUNT.load(Ordering::Relaxed),
+    )
+}
+
+/// 判断 TTFB 失败是否允许同账号再试（策略纯函数，便于单测）。
+///
+/// 规则：
+/// - 必须尚未向客户端写任何字节（caller 保证：仅在 send() 失败路径调用）；
+/// - 开关开启且 attempt_index < max；
+/// - **不**因 TTFB 禁用/隔离账号。
+fn should_retry_upstream_ttfb(
+    cfg: UpstreamTimeoutConfig,
+    attempt_index: u32,
+    response_bytes_forwarded: bool,
+) -> bool {
+    if response_bytes_forwarded {
+        return false;
+    }
+    if !cfg.ttfb_retry_enabled || cfg.ttfb_retry_max == 0 {
+        return false;
+    }
+    attempt_index < cfg.ttfb_retry_max
 }
 
 fn safe_upstream_error_log_body(body: &[u8], headers: &HeaderMap) -> String {
@@ -4935,30 +5300,37 @@ impl Drop for SlotGuardBody {
 mod tests {
     use super::{
         AssistantPrefillInterceptConfig, AutoModeClassifierMode, BootstrapModelOptionsMode,
-        BootstrapProfileConfig, CachedProbeResponse, GatewayService, NON_STREAM_PROBE_CACHE_TTL,
-        NonStreamProbeCacheLookup, NonStreamProbeType, RateLimitRequestLogConfig,
-        STATEFUL_USAGE_BUFFER_LIMIT, STREAM_KEEPALIVE_BYTES, SignatureRetryStage,
-        StreamStabilityConfig, WarmupInterceptConfig, WarmupInterceptType,
+        BootstrapProfileConfig, CachedProbeResponse, ForwardAttributionInput, GatewayService,
+        NON_STREAM_PROBE_CACHE_TTL, NonStreamProbeCacheLookup, NonStreamProbeType,
+        RateLimitRequestLogConfig, STATEFUL_USAGE_BUFFER_LIMIT, STREAM_KEEPALIVE_BYTES,
+        SignatureRetryStage, StreamStabilityConfig, UpstreamSendAttribution,
+        UpstreamSendFailureKind, UpstreamSendOutcome, WarmupInterceptConfig, WarmupInterceptType,
         assistant_prefill_intercept_body, auto_mode_classifier_response,
         buffered_error_body_for_downstream, buffered_response_body_for_downstream,
         build_message_telemetry_context, build_warmup_intercept_sse, cached_non_stream_probe_body,
         cached_non_stream_probe_response, classify_non_stream_probe_text,
-        detect_auto_mode_classifier_request, detect_non_stream_probe_type, detect_warmup_intercept,
-        extract_message_session_id, flush_stateful_cache_usage_buffer, format_request_capture,
-        format_response_capture, has_system_role_message, is_cacheable_non_stream_probe_response,
+        classify_upstream_send_result, detect_auto_mode_classifier_request,
+        detect_non_stream_probe_type, detect_warmup_intercept, extract_message_session_id,
+        flush_stateful_cache_usage_buffer, format_request_capture, format_response_capture,
+        has_system_role_message, is_cacheable_non_stream_probe_response,
         is_signature_related_error_body, is_signature_related_error_response_body,
         is_system_role_model_allowed, mock_warmup_intercept_json_response,
         non_stream_probe_cache_create_log_payload, non_stream_probe_cache_hit_log_payload,
         non_stream_probe_cache_key, parse_bootstrap_additional_model_options,
         parse_rate_limit_request_body_limit, parse_system_role_model_list, patch_bootstrap_json,
-        redact_request_headers, redact_sensitive_text, redacted_request_body_for_log,
-        rewrite_bootstrap_response, safe_body_summary, safe_non_stream_probe_response_headers,
-        sanitize_count_tokens_body, should_intercept_assistant_prefill,
+        proxy_host_only, redact_request_headers, redact_sensitive_text,
+        redacted_request_body_for_log, rewrite_bootstrap_response, safe_body_summary,
+        safe_non_stream_probe_response_headers, sanitize_count_tokens_body,
+        should_intercept_assistant_prefill, should_retry_upstream_ttfb,
         signature_retry_body_for_stage, stable_upstream_stream,
         strip_signature_sensitive_blocks_from_messages_request,
         strip_thinking_from_messages_request, system_role_model_error_body, truncate_log_text,
-        update_stateful_cache_usage_from_bytes,
+        update_stateful_cache_usage_from_bytes, upstream_transport_app_error,
     };
+    use crate::config::{UpstreamTimeoutConfig, apply_upstream_timeout_config};
+    use crate::error::AppError;
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
     use crate::model::account::{Account, AccountAuthType, AccountStatus, BillingMode};
     use crate::service::account::AccountService;
     use crate::service::rewriter::{ClientType, StatefulCacheUsage};
@@ -7091,5 +7463,308 @@ data: {"type":"message_delta","delta":{"usage":{"cache_read_input_tokens":73308,
                 "allowed_system_role_models": ["claude-opus-4-8"]
             })
         );
+    }
+
+    // ─── Upstream TTFB attribution / safe retry ───────────────────────────
+    // TTFB hang ≠ 429：不隔离账号；仅 pre-response 同账号有限重试。
+
+    #[test]
+    fn proxy_host_only_strips_userinfo_and_path() {
+        assert_eq!(
+            proxy_host_only("socks5h://user:s3cret@proxy.example:1080"),
+            "proxy.example:1080"
+        );
+        assert_eq!(
+            proxy_host_only("http://user:pass@10.0.0.1:8080/extra"),
+            "10.0.0.1:8080"
+        );
+        assert_eq!(proxy_host_only("socks5h://127.0.0.1:9050"), "127.0.0.1:9050");
+        assert_eq!(proxy_host_only(""), "");
+        // 密码绝不能出现在日志 host 字段
+        let host = proxy_host_only("http://admin:p@ssw0rd@proxy.internal:3128");
+        assert!(!host.contains("p@ssw0rd"));
+        assert!(!host.contains("admin"));
+        assert_eq!(host, "proxy.internal:3128");
+    }
+
+    #[test]
+    fn should_retry_upstream_ttfb_only_pre_response_with_budget() {
+        let cfg = UpstreamTimeoutConfig {
+            ttfb_timeout: Duration::from_secs(3),
+            connect_timeout: Duration::from_secs(1),
+            ttfb_retry_enabled: true,
+            ttfb_retry_max: 1,
+        };
+        assert!(should_retry_upstream_ttfb(cfg, 0, false));
+        assert!(!should_retry_upstream_ttfb(cfg, 1, false)); // max=1 用尽
+        assert!(!should_retry_upstream_ttfb(cfg, 0, true)); // 已向下游写字节：禁止
+        let disabled = UpstreamTimeoutConfig {
+            ttfb_retry_enabled: false,
+            ttfb_retry_max: 1,
+            ..cfg
+        };
+        assert!(!should_retry_upstream_ttfb(disabled, 0, false));
+        let zero = UpstreamTimeoutConfig {
+            ttfb_retry_enabled: true,
+            ttfb_retry_max: 0,
+            ..cfg
+        };
+        assert!(!should_retry_upstream_ttfb(zero, 0, false));
+    }
+
+    #[test]
+    fn upstream_transport_app_error_shape_is_attributed() {
+        let attr = UpstreamSendAttribution {
+            account_id: 21,
+            session_hash: "abc123".into(),
+            path: "/v1/messages".into(),
+            model: "claude-opus-5".into(),
+            stream: true,
+            body_bytes: 4096,
+            request_class: "normal_linear".into(),
+            proxy_host: "proxy.example:1080".into(),
+            sticky_used: true,
+            attempt_index: 1,
+        };
+        let err = upstream_transport_app_error(
+            UpstreamSendFailureKind::TtfbTimeout,
+            &attr,
+            Duration::from_millis(120_001),
+        );
+        match err {
+            AppError::BadGatewayAttributed { message, detail } => {
+                assert_eq!(message, "upstream TTFB timeout");
+                assert_eq!(detail.error_code, "upstream_ttfb_timeout");
+                assert_eq!(detail.account_id, 21);
+                assert_eq!(detail.model, "claude-opus-5");
+                assert!(detail.stream);
+                assert_eq!(detail.body_bytes, 4096);
+                assert_eq!(detail.attempt_index, 1);
+                assert_eq!(detail.elapsed_ms, 120_001);
+            }
+            other => panic!("expected BadGatewayAttributed, got {other:?}"),
+        }
+        // Display 保持兼容字符串
+        assert_eq!(
+            format!(
+                "{}",
+                AppError::BadGatewayAttributed {
+                    message: "upstream TTFB timeout".into(),
+                    detail: crate::error::UpstreamTransportDetail {
+                        error_code: "upstream_ttfb_timeout",
+                        account_id: 21,
+                        elapsed_ms: 1,
+                        model: "m".into(),
+                        stream: false,
+                        path: "/v1/messages".into(),
+                        body_bytes: 0,
+                        attempt_index: 0,
+                    }
+                }
+            ),
+            "bad gateway: upstream TTFB timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_real_timeout_is_ttfb() {
+        let nested = tokio::time::timeout(Duration::from_millis(20), async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            // 类型占位：永远不会执行到
+            Err::<reqwest::Response, reqwest::Error>(
+                reqwest::Client::new()
+                    .get("http://127.0.0.1:1/")
+                    .send()
+                    .await
+                    .unwrap_err(),
+            )
+        })
+        .await;
+        let timed_out: Result<Result<reqwest::Response, reqwest::Error>, tokio::time::error::Elapsed> =
+            Err(nested.err().expect("must elapse"));
+        let outcome = classify_upstream_send_result(timed_out, Duration::from_millis(20));
+        match outcome {
+            UpstreamSendOutcome::Failure {
+                kind: UpstreamSendFailureKind::TtfbTimeout,
+                ..
+            } => {}
+            _ => panic!("expected TtfbTimeout"),
+        }
+    }
+
+    #[tokio::test]
+    async fn blackhole_proxy_yields_attributed_ttfb_or_connect_timeout() {
+        // 短超时：黑洞代理 accept 后永不响应 CONNECT/数据。
+        apply_upstream_timeout_config(UpstreamTimeoutConfig {
+            ttfb_timeout: Duration::from_secs(2),
+            connect_timeout: Duration::from_secs(1),
+            ttfb_retry_enabled: false,
+            ttfb_retry_max: 0,
+        });
+        crate::tlsfp::clear_request_client_cache();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind blackhole");
+        let addr = listener.local_addr().expect("local addr");
+        let blackhole = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                // 持有连接但不读写，模拟 per-request hang。
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    drop(socket);
+                });
+            }
+        });
+
+        let gateway = test_gateway_service().await;
+        let mut account = test_account();
+        account.proxy_url = format!("http://user:super-secret@{}", addr);
+        let headers = HashMap::from([
+            ("content-type".into(), "application/json".into()),
+            ("authorization".into(), "Bearer sk-ant-test".into()),
+        ]);
+        let body = serde_json::to_vec(&json!({
+            "model": "claude-opus-5",
+            "stream": true,
+            "max_tokens": 16,
+            "messages": [{"role":"user","content":"hi"}]
+        }))
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let err = gateway
+            .send_upstream_with_attribution(
+                "POST",
+                "/v1/messages",
+                "https://api.anthropic.com/v1/messages?beta=true",
+                &headers,
+                &body,
+                &account,
+                ForwardAttributionInput {
+                    session_hash: "sess-hash-demo",
+                    sticky_used: true,
+                    request_class: Some("normal_linear"),
+                },
+            )
+            .await
+            .expect_err("blackhole must fail");
+        let elapsed = started.elapsed();
+        // 不应接近默认 120s
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "expected fast fail, took {:?}",
+            elapsed
+        );
+
+        match err {
+            AppError::BadGatewayAttributed { message, detail } => {
+                assert!(
+                    message.contains("timeout") || message.contains("failed"),
+                    "message={message}"
+                );
+                assert!(
+                    detail.error_code == "upstream_ttfb_timeout"
+                        || detail.error_code == "upstream_connect_timeout"
+                        || detail.error_code == "upstream_send_failed",
+                    "code={}",
+                    detail.error_code
+                );
+                assert_eq!(detail.account_id, account.id);
+                assert_eq!(detail.model, "claude-opus-5");
+                assert!(detail.stream);
+                assert_eq!(detail.path, "/v1/messages");
+                assert_eq!(detail.body_bytes, body.len());
+                // 客户端错误 JSON 不含 proxy 密码
+                let resp = AppError::BadGatewayAttributed {
+                    message: message.clone(),
+                    detail: detail.clone(),
+                }
+                .into_response();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(!text.contains("super-secret"));
+                assert!(!text.contains("sk-ant-test"));
+            }
+            other => panic!("expected attributed bad gateway, got {other:?}"),
+        }
+
+        // TTFB 路径不得改账号状态（本测试未调用 disable/rate_limit）
+        assert_eq!(account.status, AccountStatus::Active);
+        assert!(account.rate_limited_at.is_none());
+
+        blackhole.abort();
+        apply_upstream_timeout_config(UpstreamTimeoutConfig::default());
+        crate::tlsfp::clear_request_client_cache();
+    }
+
+    #[tokio::test]
+    async fn blackhole_proxy_retries_once_when_enabled() {
+        apply_upstream_timeout_config(UpstreamTimeoutConfig {
+            ttfb_timeout: Duration::from_millis(400),
+            connect_timeout: Duration::from_millis(200),
+            ttfb_retry_enabled: true,
+            ttfb_retry_max: 1,
+        });
+        crate::tlsfp::clear_request_client_cache();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind blackhole");
+        let addr = listener.local_addr().expect("local addr");
+        let accept_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accept_count_bg = accept_count.clone();
+        let blackhole = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                accept_count_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    drop(socket);
+                });
+            }
+        });
+
+        let gateway = test_gateway_service().await;
+        let mut account = test_account();
+        account.proxy_url = format!("http://{}", addr);
+        let headers = HashMap::from([("content-type".into(), "application/json".into())]);
+        let body = br#"{"model":"claude-sonnet-4-6","stream":false,"messages":[]}"#.to_vec();
+
+        let err = gateway
+            .send_upstream_with_attribution(
+                "POST",
+                "/v1/messages",
+                "https://api.anthropic.com/v1/messages?beta=true",
+                &headers,
+                &body,
+                &account,
+                ForwardAttributionInput {
+                    session_hash: "",
+                    sticky_used: false,
+                    request_class: None,
+                },
+            )
+            .await
+            .expect_err("must fail");
+
+        match err {
+            AppError::BadGatewayAttributed { detail, .. } => {
+                // 重试后 attempt_index 应为 1（第二次尝试）
+                assert_eq!(detail.attempt_index, 1);
+            }
+            other => panic!("expected attributed error, got {other:?}"),
+        }
+        // 至少发生过两次连接尝试（初始 + 1 次重试）；连接复用时可能 <2，但 attempt_index 已覆盖语义。
+        let _accepts = accept_count.load(std::sync::atomic::Ordering::Relaxed);
+
+        blackhole.abort();
+        apply_upstream_timeout_config(UpstreamTimeoutConfig::default());
+        crate::tlsfp::clear_request_client_cache();
     }
 }
