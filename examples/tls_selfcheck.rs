@@ -10,7 +10,7 @@
 
 use claude_code_gateway::tlsfp::make_request_client;
 
-/// 目标：真实 claude-cli/2.1.211（Bun/Node v26.3.0，无 padding）抓到的指纹。
+/// 目标：真实 claude-cli/2.1.212（Bun/Node v26.3.0，无 padding）抓到的指纹。
 const EXPECTED_JA3_HASH: &str = "dc782a9d905fdcee1223a3d4e8108bc6";
 const EXPECTED_JA4: &str = "t13d1713h1_5b57614c22b0_b6f405a75b75"; // approx; selfcheck only strictly asserts JA3
 
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = make_request_client(&proxy);
     let resp = client
         .get("https://tls.peet.ws/api/all")
-        .header("user-agent", "claude-cli/2.1.211 (external, sdk-cli)")
+        .header("user-agent", "claude-cli/2.1.212 (external, sdk-cli)")
         .send()
         .await?;
     println!("HTTP {}", resp.status());

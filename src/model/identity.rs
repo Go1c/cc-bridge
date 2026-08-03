@@ -403,7 +403,7 @@ pub fn build_full_env_json(env: &CanonicalEnvData) -> Value {
         "terminal": env.terminal,
         "package_managers": env.package_managers,
         "runtimes": env.runtimes,
-        // 2.1.211 本机二进制由 Bun 编译；Stainless 仍报 node/v26.3.0，但 env 画像里该标志为 true。
+        // 2.1.212 本机二进制由 Bun 编译；Stainless 仍报 node/v26.3.0，但 env 画像里该标志为 true。
         "is_running_with_bun": true,
         "is_ci": false,
         "is_claubbit": false,

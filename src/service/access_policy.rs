@@ -7,7 +7,7 @@ use crate::error::AppError;
 /// 默认允许的 Claude Code / Claude CLI 版本范围。
 ///
 /// 下界挡住过旧客户端；上界给到 `2.1.999`，避免新小版本（如 2.1.212）被入口误拒。
-/// 出口伪装版本仍由账号画像 / `version_profile` 决定（当前默认 2.1.211），与此范围无关。
+/// 出口伪装版本仍由账号画像 / `version_profile` 决定（当前默认 2.1.212），与此范围无关。
 pub const DEFAULT_ALLOWED_CLAUDE_CODE_VERSIONS: &str = "2.1.89-2.1.999";
 /// 默认允许的非 Claude Code 客户端 User-Agent。
 pub const DEFAULT_ALLOWED_USER_AGENTS: &str = "AI-Hub-Monitor*\npython-httpx*";

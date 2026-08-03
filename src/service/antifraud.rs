@@ -389,7 +389,10 @@ fn evaluate_account(
         findings.push(Finding {
             code: "bun_flag_false".into(),
             severity: FindingSeverity::Info,
-            message: "2.1.211 本机为 Bun 编译产物，建议 is_running_with_bun=true".into(),
+            message: format!(
+                "{} 本机为 Bun 编译产物，建议 is_running_with_bun=true",
+                DEFAULT_CLAUDE_CODE_VERSION
+            ),
         });
     }
 

@@ -198,7 +198,7 @@ fn beta_header_for_path(path: &str, model_id: &str) -> String {
 }
 
 fn is_fable_model(model_id: &str) -> bool {
-    // 2.1.211 抓包显示 Fable `[1m]` 不会改变主请求画像，不能用后缀裁剪推断 beta。
+    // 2.1.211+ 抓包显示 Fable `[1m]` 不会改变主请求画像，不能用后缀裁剪推断 beta。
     model_id == FABLE_MODEL_ID
 }
 
@@ -1190,14 +1190,14 @@ impl Rewriter {
                 text = BILLING_VERSION_REGEX
                     .replace_all(&text, &format!("cc_version={}.{}", version, cch_hash))
                     .to_string();
-                // 2.1.211 真实抓包不再发送 cch=；旧版本仍重置占位符供后续 xxhash 回填。
+                // 2.1.211+ 真实抓包不再发送 cch=；旧版本仍重置占位符供后续 xxhash 回填。
                 if billing_uses_cch(version) {
                     text = CCH_VALUE_REGEX.replace_all(&text, "cch=00000").to_string();
                 } else {
                     text = CCH_FIELD_REGEX.replace_all(&text, "").to_string();
                     text = text.replace(";;", ";");
                 }
-                // 入口统一改写为当前版本真实值（2.1.211 = sdk-cli）。
+                // 入口统一改写为当前版本真实值（2.1.211+ = sdk-cli）。
                 text = BILLING_ENTRYPOINT_REGEX
                     .replace_all(&text, &format!("cc_entrypoint={};", billing_entrypoint(version)))
                     .to_string();
@@ -1378,7 +1378,7 @@ static BILLING_VERSION_REGEX: Lazy<Regex> =
 static BILLING_ENTRYPOINT_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"cc_entrypoint=[^;]+;?").unwrap());
 static CCH_VALUE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"cch=[a-f0-9]{5}").unwrap());
-/// 匹配整段 `cch=xxxxx;` 字段（含可选分号），用于 2.1.211+ 剥离。
+/// 匹配整段 `cch=xxxxx;` 字段（含可选分号），用于 2.1.211+ / 2.1.212 剥离。
 static CCH_FIELD_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s*cch=[a-f0-9]{5};?").unwrap());
 static GIT_USER_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"Git user:\s*[^\n]+").unwrap());
 static SYSTEM_REMINDER_REGEX: Lazy<Regex> =
@@ -1417,7 +1417,7 @@ fn compute_cch_attestation(mut body: Vec<u8>, version: &str) -> Vec<u8> {
 }
 
 fn refresh_cch_attestation(mut body: Vec<u8>, version: &str) -> Vec<u8> {
-    // 2.1.211 真实客户端不再发送 cch=；若 body 里仍残留旧字段则直接剥离。
+    // 2.1.211+ 真实客户端不再发送 cch=；若 body 里仍残留旧字段则直接剥离。
     if !billing_uses_cch(version) {
         return strip_cch_field_from_body_bytes(body);
     }
@@ -1442,10 +1442,10 @@ fn strip_cch_field_from_body_bytes(body: Vec<u8>) -> Vec<u8> {
 
 fn cch_attestation_input(body: &[u8], version: &str) -> Vec<u8> {
     // 2.1.172/2.1.173 的 CCH 输入会清空顶层 model，并剔除 max_tokens/fallbacks。
-    // 2.1.211 真实客户端已不再发送 cch 字段；若旧 body 仍带占位符，沿用 173 口径以保持兼容。
+    // 2.1.211+ 真实客户端已不再发送 cch 字段；若旧 body 仍带占位符，沿用 173 口径以保持兼容。
     if !matches!(
         normalize_version(version),
-        "2.1.172" | "2.1.173" | "2.1.211"
+        "2.1.172" | "2.1.173" | "2.1.211" | "2.1.212"
     ) {
         return body.to_vec();
     }
@@ -1455,15 +1455,15 @@ fn cch_attestation_input(body: &[u8], version: &str) -> Vec<u8> {
     remove_top_level_field(&normalized, "fallbacks")
 }
 
-/// 2.1.211 真实抓包的 billing header **不含** `cch=` 字段。
+/// 2.1.211 / 2.1.212 真实抓包的 billing header **不含** `cch=` 字段。
 fn billing_uses_cch(version: &str) -> bool {
-    !matches!(normalize_version(version), "2.1.211")
+    !matches!(normalize_version(version), "2.1.211" | "2.1.212")
 }
 
-/// 2.1.211 真实抓包的 `cc_entrypoint` 为 `sdk-cli`。
+/// 2.1.211 / 2.1.212 真实抓包的 `cc_entrypoint` 为 `sdk-cli`。
 fn billing_entrypoint(version: &str) -> &'static str {
     match normalize_version(version) {
-        "2.1.211" => "sdk-cli",
+        "2.1.211" | "2.1.212" => "sdk-cli",
         _ => "cli",
     }
 }
@@ -1521,7 +1521,9 @@ fn random_cc_version_suffix(bytes: [u8; 2]) -> String {
 /// 返回指定 Claude Code 版本使用的 CCH attestation seed。
 fn cch_attestation_seed(version: &str) -> u64 {
     match normalize_version(version) {
-        "2.1.156" | "2.1.169" | "2.1.172" | "2.1.173" | "2.1.211" => CCH_ATTESTATION_SEED_2156,
+        "2.1.156" | "2.1.169" | "2.1.172" | "2.1.173" | "2.1.211" | "2.1.212" => {
+            CCH_ATTESTATION_SEED_2156
+        }
         _ => CCH_ATTESTATION_SEED_LEGACY,
     }
 }
@@ -4791,7 +4793,7 @@ fn scrub_git_user_in_reminders(body: &mut serde_json::Value, replacement_name: &
 
 /// 将 canonical env 的 platform 映射为 X-Stainless-OS 值。
 ///
-/// 2.1.211 真实抓包：`X-Stainless-OS: MacOS`（不是旧的 `Mac OS X`）。
+/// 2.1.211+ 真实抓包：`X-Stainless-OS: MacOS`（不是旧的 `Mac OS X`）。
 fn stainless_os_from_platform(platform: &str) -> &str {
     match platform {
         "darwin" => "MacOS",
@@ -5237,7 +5239,7 @@ mod tests {
         assert!(!text.contains("cch=12345"));
         assert!(!text.contains("cch=00000"));
 
-        // 2.1.211 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
+        // 2.1.211+ 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
         assert!(!text.contains("cch="));
         assert!(text.contains("cc_entrypoint=sdk-cli;"));
     }
@@ -7729,7 +7731,7 @@ mod tests {
                     .as_str()
             )
         );
-        // 2.1.211 真实抓包：entrypoint=sdk-cli，且不再发送 cch=。
+        // 2.1.211+ 真实抓包：entrypoint=sdk-cli，且不再发送 cch=。
         assert!(billing.contains("cc_entrypoint=sdk-cli;"));
         assert!(!billing.contains("cch="));
         assert_eq!(system[1]["text"], json!(super::CLAUDE_CODE_SYSTEM_PROMPT));
@@ -8207,7 +8209,7 @@ mod tests {
         );
         assert!(!message_cache_control_positions(&parsed).is_empty());
 
-        // 2.1.211 真实抓包不再发送 cch=；API mimicry 与本地 CLI 对齐。
+        // 2.1.211+ 真实抓包不再发送 cch=；API mimicry 与本地 CLI 对齐。
         assert!(!text.contains("cch="));
         assert!(text.contains("cc_entrypoint=sdk-cli;"));
         assert!(text.contains(&format!("cc_version={DEFAULT_CLAUDE_CODE_VERSION}.")));
@@ -8237,7 +8239,7 @@ mod tests {
         let beta = headers.get("anthropic-beta").unwrap();
 
         assert!(beta.contains("extended-cache-ttl-2025-04-11"));
-        // 2.1.211 主请求 beta 不再包含 cache-diagnosis / redact-thinking / advanced-tool-use。
+        // 2.1.211+ 主请求 beta 不再包含 cache-diagnosis / redact-thinking / advanced-tool-use。
         assert!(!beta.contains("cache-diagnosis-2026-04-07"));
         assert!(!beta.contains("redact-thinking-2026-02-12"));
         assert!(!beta.contains("context-1m-2025-08-07"));
@@ -8799,21 +8801,28 @@ mod tests {
         assert_eq!(cch_attestation_seed("2.1.172"), 0x4D659218E32A3268);
         assert_eq!(cch_attestation_seed("2.1.173"), 0x4D659218E32A3268);
         assert_eq!(cch_attestation_seed("2.1.211"), 0x4D659218E32A3268);
+        assert_eq!(cch_attestation_seed("2.1.212"), 0x4D659218E32A3268);
         assert_eq!(cch_attestation_seed("2.1.81"), 0x6E52736AC806831E);
         assert_eq!(cch_attestation_seed("2.1.999"), 0x6E52736AC806831E);
     }
 
     #[test]
-    fn billing_header_for_211_matches_local_capture() {
-        let header = super::format_billing_header("2.1.211", "b7f");
+    fn billing_header_for_212_matches_local_cli() {
+        let header = super::format_billing_header("2.1.212", "b7f");
         assert_eq!(
             header,
-            "x-anthropic-billing-header: cc_version=2.1.211.b7f; cc_entrypoint=sdk-cli;"
+            "x-anthropic-billing-header: cc_version=2.1.212.b7f; cc_entrypoint=sdk-cli;"
         );
         assert!(!header.contains("cch="));
         assert_eq!(
-            claude_cli_user_agent("2.1.211"),
-            "claude-cli/2.1.211 (external, sdk-cli)"
+            claude_cli_user_agent("2.1.212"),
+            "claude-cli/2.1.212 (external, sdk-cli)"
+        );
+        // 2.1.211 历史路径仍保持 sdk-cli + 无 cch。
+        let header_211 = super::format_billing_header("2.1.211", "b7f");
+        assert_eq!(
+            header_211,
+            "x-anthropic-billing-header: cc_version=2.1.211.b7f; cc_entrypoint=sdk-cli;"
         );
         assert_eq!(super::stainless_os_from_platform("darwin"), "MacOS");
     }
@@ -8886,12 +8895,16 @@ mod tests {
     }
 
     #[test]
-    fn cch_refresh_strips_cch_for_211() {
-        let body = br#"{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.211.b7f; cc_entrypoint=sdk-cli; cch=40943;"}],"messages":[]}"#;
-        let out = super::refresh_cch_attestation(body.to_vec(), "2.1.211");
-        let text = String::from_utf8(out).unwrap();
-        assert!(!text.contains("cch="));
-        assert!(text.contains("cc_entrypoint=sdk-cli;"));
+    fn cch_refresh_strips_cch_for_211_and_212() {
+        for version in ["2.1.211", "2.1.212"] {
+            let body = format!(
+                r#"{{"system":[{{"type":"text","text":"x-anthropic-billing-header: cc_version={version}.b7f; cc_entrypoint=sdk-cli; cch=40943;"}}],"messages":[]}}"#
+            );
+            let out = super::refresh_cch_attestation(body.into_bytes(), version);
+            let text = String::from_utf8(out).unwrap();
+            assert!(!text.contains("cch="), "version={version}");
+            assert!(text.contains("cc_entrypoint=sdk-cli;"), "version={version}");
+        }
     }
 
     #[test]
@@ -8899,8 +8912,8 @@ mod tests {
         let mut account = test_account();
         account.billing_mode = BillingMode::Strip;
         let rewriter = Rewriter::new();
-        // 默认账号版本已是 2.1.211：refresh 应剥离残留 cch。
-        let body = br#"{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.211.b7f; cc_entrypoint=sdk-cli; cch=40943;"}],"messages":[{"role":"assistant","content":[{"type":"text","text":"api sanitized"}]}]}"#;
+        // 默认账号版本已是 2.1.212：refresh 应剥离残留 cch。
+        let body = br#"{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.212.b7f; cc_entrypoint=sdk-cli; cch=40943;"}],"messages":[{"role":"assistant","content":[{"type":"text","text":"api sanitized"}]}]}"#;
         let out = rewriter.refresh_cch_attestation(body.to_vec(), &account, ClientType::API);
         let text = String::from_utf8(out.clone()).unwrap();
 
@@ -8975,7 +8988,7 @@ mod tests {
             json!("5m")
         );
 
-        // 2.1.211 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
+        // 2.1.211+ 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
         assert!(!text.contains("cch="));
         assert!(text.contains("cc_entrypoint=sdk-cli;"));
     }
@@ -9019,7 +9032,7 @@ mod tests {
         assert!(!text.contains("cch=00000"));
         assert_eq!(message_cache_control_positions(&parsed).len(), 4);
 
-        // 2.1.211 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
+        // 2.1.211+ 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
         assert!(!text.contains("cch="));
         assert!(text.contains("cc_entrypoint=sdk-cli;"));
     }
@@ -9053,7 +9066,7 @@ mod tests {
         assert!(!text.contains("cch=00000"));
         assert_eq!(message_cache_control_positions(&parsed).len(), 4);
 
-        // 2.1.211 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
+        // 2.1.211+ 真实抓包不再发送 cch=，billing rewrite 会剥离旧 cch 字段。
         assert!(!text.contains("cch="));
         assert!(text.contains("cc_entrypoint=sdk-cli;"));
     }
